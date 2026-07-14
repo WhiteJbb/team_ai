@@ -413,7 +413,27 @@
 - **결정**: 표준 라이브러리 sqlite3를 asyncio.to_thread로 감싼다. 신규 의존성 0,
   단일 세션·로컬 파일 규모(M2b)에 충분. 요청 경로 블로킹은 SessionManager의
   write-behind 큐(단일 라이터, 종료 시 flush)가 차단한다.
-- **대안**: aiosqlite — 의존성 추가 대비 이득 없음(내부적
+- **대안**: aiosqlite — 의존성 추가 대비 이득 없음(내부적으로 스레드 실행).
+
+## D-030 (2026-07-14) 기본 팀 합의 모드 participating_unanimous(min 1) + max_turns 25
+
+- **상태**: 채택 (사용자 결정).
+- **맥락**: chatgpt_oauth 실 세션 3회 연속 no_quorum. DB 타임라인 실증 결과
+  (WorkLog 참조): ① 심의자가 채팅으로 max_turns(15)를 voting 25초 만에 소진해
+  투표가 물리적으로 불가능해짐, ② 다른 심의자는 스트림 무응답으로 세션 내내
+  hang. unanimous는 "스냅샷 심의자 전원 approve"라 심의자 1명의 hang/턴
+  소진만으로 no_quorum이 보장된다(기권은 어떤 정책에서도 승인이 아님 — D-020).
+- **결정**:
+  1. 기본 팀 approval.mode를 `unanimous` → `participating_unanimous` +
+     `minimum_votes: 1`로 변경 — 유효 투표자 전원 승인 + 최소 1표. 심의자
+     일부가 무력화돼도 나머지 승인으로 의결 가능하고, 반대표는 여전히 반려,
+     전원 기권은 minimum_votes에 걸려 no_quorum.
+  2. 3인 전원 max_turns 15/18 → 25 — 구독 모드는 토큰당 비용이 없고(D-026),
+     토론+투표를 한 예산 안에서 소화할 여유 확보. 폭주는 max_messages(60)와
+     token_budget(100k)이 계속 막는다.
+- **대안**: unanimous 유지(엄밀한 화백이지만 실패율 과다), majority(2인
+  심의자 기준 1명 hang 시 과반 불성립이라 이점 없음).
+- **결정자**: 사용자.
 
 ## D-012 (2026-07-14) 대시보드 접근: localhost 전용
 
