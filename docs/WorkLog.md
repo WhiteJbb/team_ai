@@ -2,6 +2,24 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b 완료: 실 세션 합의 성공 (feat/m2b-store)
+
+### 진행한 작업
+- D-030(participating_unanimous·max_turns 25) + 관측성/렌더링 보강 반영 후
+  4차 실 세션(chatgpt_oauth, 3인 팀) **completed** — 제안 v1에 2/2 approve,
+  최종 결과 정상 수령. M2b 완료 기준(실 API 스모크) 충족.
+- 세션 타이밍 분석(DB 실증): 총 223초 = 토론 207초 + **투표 15.8초**.
+  LLM 호출 28회, 호출 간격 중앙값 2.4초·최대 **150.2초** — 구독 백엔드가
+  간헐적으로 호출 1건을 2~3분 지연시키는 것이 체감 지연의 원인(critic·research
+  각 1회씩 ~150초대 호출 관측). 우리 쪽 대기 로직 아님. read 타임아웃(180s)
+  직전까지 가는 수준 — 지연이 더 심해지면 타임아웃 조정 또는
+  reasoning effort 하향(payload `reasoning`은 구독 화이트리스트에 포함) 검토.
+- 문서 정합: README 마일스톤 표 M2b 완료 표기, Plan.md M2b 완료 처리.
+
+### 남은 것
+- M2b PR 생성 → squash merge. 다음 마일스톤 M3(FastAPI 서버).
+- 관찰 항목: 구독 백엔드 간헐 지연(150s+), device flow rate limit.
+
 ## 2026-07-14 — M2b: 실 세션 3차 분석(DB 실증) — 관측성·타임아웃·투표 UX 보강 (feat/m2b-store)
 
 ### 진행한 작업
