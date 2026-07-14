@@ -2,6 +2,18 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2a 머지 (PR #2)
+
+### 진행한 작업
+- M2a PR(#2) squash merge → main, 작업 브랜치 삭제. main에서 전체 테스트
+  377개 통과 확인.
+- main 히스토리: PR 단위 유지 (#1 M1 계약, #2 M2a 코어+기본 팀).
+
+### 다음 할 일
+- **M2b** (`feat/m2b-store` 브랜치): store/sqlite.py 접목, chatgpt_oauth 인증
+  모드, 도메인 이벤트 taxonomy 확정(EventContract §8), **실 API 스모크**
+- 실 API 스모크 전 확인: OPENAI_API_KEY 준비 (대등 3인 세션 1회 실행 비용 발생)
+
 ## 2026-07-14 — 기본 팀 확정(대등 3인) + capabilities 도구 권한 (feat/m2a-core, D-027)
 
 ### 진행한 작업
