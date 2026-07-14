@@ -88,7 +88,7 @@ agents:                  # 1명 이상
 | M0 | 방향 결정, 기술 조사, 문서/계획 수립 | ✅ 완료 |
 | M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
 | M2a | 코어 엔진 (버스/에이전트 루프/합의/종료 정책, 인메모리) | ✅ 완료 |
-| M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | 예정 |
+| M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | 진행 중 (실 API 스모크 남음) |
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
@@ -105,7 +105,7 @@ agents:                  # 1명 이상
   ([docs/DecisionLog.md](docs/DecisionLog.md) D-008/D-009)
 - FastAPI + uvicorn, SSE
 
-## 실행 (콘솔 스모크, M2a)
+## 실행 (콘솔 스모크)
 
 ```
 # 밀폐 스모크 — 실키/네트워크 없이 전체 스택 확인
@@ -113,10 +113,15 @@ agents:                  # 1명 이상
 
 # 실제 실행 — OPENAI_API_KEY 필요 (기본 팀: configs/team.default.yaml)
 .venv\Scripts\python.exe -m hwabaek.run "your task"
+
+# ChatGPT 구독(OAuth) 모드 — 최초 1회 로그인 후 사용 (D-026, 실험적)
+.venv\Scripts\python.exe -m hwabaek.llm.chatgpt_auth login
+.venv\Scripts\python.exe -m hwabaek.run "your task" --auth chatgpt_oauth
 ```
 
 세션 이벤트가 콘솔에 실시간 출력되고, 종료 시 상태·결과(또는 미승인 초안)·토큰
-사용량이 표시됩니다. 웹 대시보드는 M4에서 제공됩니다.
+사용량이 표시됩니다. 세션 기록은 기본적으로 SQLite(`data/hwabaek.db`)에
+저장됩니다 — 경로는 `--db`, 비활성화는 `--no-db`. 웹 대시보드는 M4에서 제공됩니다.
 
 ## 개발 환경 (Windows)
 
@@ -129,9 +134,18 @@ py -m venv .venv
 - venv는 네이티브 Windows Python(3.11+, `py` 런처)으로 만듭니다 — git-bash의
   MSYS2 python은 venv 레이아웃이 달라 프로젝트 규칙과 어긋납니다 (DecisionLog D-014).
 
-- 인증: `OPENAI_API_KEY` 환경변수(기본) 또는 ChatGPT subscription OAuth(선택 모드,
-  M2b 예정 — 비공식 경로라 OpenAI 약관 변경 시 제거될 수 있습니다, D-026).
-  API 키는 로그·대시보드에 노출되지 않습니다.
+- 인증(D-026 하이브리드): `OPENAI_API_KEY` 환경변수(기본·공식) 또는 ChatGPT
+  subscription OAuth(`--auth chatgpt_oauth`, 선택·**비공식**). API 키와 OAuth 토큰은
+  로그·오류 메시지·대시보드 어디에도 노출되지 않습니다.
+- chatgpt_oauth 모드 고지 (실험적):
+  - OpenAI가 공식 보장하지 않는 경로입니다 — 약관 변경 시 예고 없이 제거될 수
+    있습니다 (Anthropic·Google이 동일 경로를 차단한 전례 있음).
+  - 구독 백엔드는 `max_output_tokens`를 거부하므로 토큰 예산은 **사후 집계로만**
+    강제됩니다 — 응답 1건이 예산을 초과해 끝날 수 있습니다.
+  - gpt-5.6의 구독 백엔드 지원, 스트리밍(stream)/accept 헤더 강제 여부는 아직
+    실계정으로 검증되지 않았습니다 — 첫 실사용에서 오류가 나면 이슈로 남겨주세요.
+  - 토큰 파일(`~/.hwabaek/chatgpt_token.json`)은 Windows에서 사용자 프로필 ACL에
+    의존합니다. 경로는 `HWABAEK_CHATGPT_AUTH_FILE`로 재정의할 수 있습니다.
 - 서버는 localhost(127.0.0.1) 전용이며, 세션은 동시에 1개만 실행됩니다.
 
 ## 문서

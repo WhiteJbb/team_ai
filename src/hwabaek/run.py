@@ -109,6 +109,7 @@ def _fake_llm_factory(task: str):
 
 
 def _real_llm_factory(auth_mode: str):
+    from hwabaek.llm.base import LLMAuthError
     from hwabaek.llm.openai_client import OpenAIClient
 
     if auth_mode == "api_key" and not os.environ.get("OPENAI_API_KEY"):
@@ -117,8 +118,13 @@ def _real_llm_factory(auth_mode: str):
               "use --fake for a hermetic smoke)")
         raise SystemExit(2)
 
-    # chatgpt_oauth: 토큰 없으면 LLMAuthError가 로그인 명령을 안내한다 (D-026).
-    client = OpenAIClient(auth_mode=auth_mode)
+    # chatgpt_oauth: 토큰 없음/만료는 로그인 명령 안내로 종료한다 (D-026).
+    # LLMAuthError 메시지는 토큰을 싣지 않으므로 그대로 출력해도 안전하다.
+    try:
+        client = OpenAIClient(auth_mode=auth_mode)
+    except LLMAuthError as exc:
+        print(f"error: {exc}")
+        raise SystemExit(2) from None
 
     def factory(spec: AgentSpec) -> OpenAIClient:
         return client  # 어댑터는 상태 없는 호출 래퍼 — 에이전트 간 공유 가능

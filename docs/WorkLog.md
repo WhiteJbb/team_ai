@@ -2,6 +2,35 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b: chatgpt_oauth CLI 연결 마무리 (feat/m2b-store)
+
+### 진행한 작업
+- 직전 WIP 커밋(a54030d)의 TODO 소화: 전체 테스트 스위트 실행(.venv 재구성 —
+  Python 3.14, editable install) → **426개 통과**. test_chatgpt_auth.py 16개
+  (device flow 왕복/refresh/실패 경로/토큰 마스킹/payload 화이트리스트/클라이언트
+  구성) 포함 확인.
+- CLI 실동작 스모크 3종:
+  - `--fake --db <임시경로>`: 전체 스택 관통 + SQLite 저장 확인 (exit 0).
+  - `--auth chatgpt_oauth` (토큰 없음): 로그인 안내 + exit 2 — 아래 버그 수정 후.
+  - `--auth api_key` (키 없음): 기존 안내 유지 확인 (exit 2).
+- README 정합화: 실행 절에 chatgpt_oauth 로그인·사용 커맨드와 `--db`/`--no-db`
+  추가, D-026 고지를 실제 구현 상태로 갱신(비공식 경로 제거 리스크, 사후 집계
+  예산, **미실측 항목 명시** — gpt-5.6 구독 백엔드 지원/stream·accept 헤더 강제),
+  M2b 상태를 "진행 중 (실 API 스모크 남음)"으로 표기.
+
+### 오류/이슈 (수정 완료)
+- (CLI) `--auth chatgpt_oauth`로 토큰 없이 실행하면 로그인 안내 대신 **원시
+  traceback**이 그대로 노출 — run.py `_real_llm_factory`가 OpenAIClient 구성
+  시점의 LLMAuthError를 잡지 않았다. api_key 분기와 동일하게 catch → 한 줄
+  안내(`error: chatgpt login required: ...`) + exit 2로 수정 (메시지는 토큰
+  미포함이라 그대로 출력해도 안전).
+
+### 남은 것 (M2b 완료 조건)
+- **실 API 스모크** — 사용자 자원 필요: OPENAI_API_KEY(api_key 모드) 및/또는
+  실계정 `chatgpt_auth login`(chatgpt_oauth 모드 — stream/accept 헤더 강제,
+  gpt-5.6 구독 백엔드 지원 실측이 여기서만 가능). Fake 통과만으로 M2 완료 처리
+  금지(체크리스트 원칙).
+
 ## 2026-07-14 — M2a 머지 (PR #2)
 
 ### 진행한 작업
