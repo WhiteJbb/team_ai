@@ -12,7 +12,20 @@
 - [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 검토와 발견 사항 수정
 - [x] README·Plan·IA·EventContract·DecisionLog·WorkLog 정합
 - [x] `feat/m3-server` 브랜치 사용, git 산출물 AI 흔적 없음
-- [x] PR #4 생성 (`feat/m3-server` → `main`); squash merge 대기
+- [x] PR #4 squash merge 완료 (`ca1b918`), 작업 브랜치 삭제
+
+## M4 검증 기록 (2026-07-14)
+
+- [x] 전체 474개 테스트 3회 반복 통과 (5.890s / 5.906s / 5.913s)
+- [x] 실제 `--fake --db` uvicorn에서 `/app/` 정적 자산, 제출→완료, REST 상세,
+  저장된 메시지·제안, 팀 스냅샷, SSE 결과 이벤트 통과
+- [x] wheel 빌드에 `dashboard/index.html`, `styles.css`, `app.js` 포함 확인
+- [x] 설정 오류의 비밀값·YAML 원문·절대 경로 비노출 회귀 테스트 통과
+- [x] 종료 write-behind 경합, SSE/REST 기록 병합, 상태 역행, terminal agent 상태,
+  포커스 보존, 화면 전환 후 늦은 콜백 소유권 보강
+- [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 검토와 발견 사항 수정
+- [x] README·Plan·IA·DecisionLog·WorkLog 정합
+- [x] `feat/m4-dashboard` 브랜치 사용, git 산출물 AI 흔적 없음
 
 ## 기능/정확성
 
