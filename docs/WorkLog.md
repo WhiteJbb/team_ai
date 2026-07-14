@@ -2,6 +2,47 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M4 완료: localhost 웹 대시보드 (feat/m4-dashboard)
+
+### 진행한 작업
+- D-031에 따라 Node 빌드 체인 없이 `src/hwabaek/dashboard/`의 정적
+  HTML/CSS/JavaScript를 FastAPI `/app/`에서 제공하고 `/`를 `/app/`으로 연결.
+  홈/제출, 최근 최대 200개 세션, REST+SSE 상세, 읽기 전용 팀의 네 화면 구현.
+- 상세 화면에 에이전트 상태·논의 타임라인·제안/투표·토큰 예산·경과 시간·결과/초안,
+  취소·결과 복사·서버 health 감지와 반응형/키보드/aria-live 접근성을 반영.
+  시스템 프롬프트를 제외한 실행 팀 요약을 상세 응답에 추가하고 package-data에 정적
+  자산을 포함.
+- 코드 정밀 / 신규 사용자 워크스루 / 문서-코드 정합 3렌즈에서 발견한 사항을 수정:
+  - 잘못된 YAML의 API 오류에서 비밀값·원문·절대 경로가 노출되던 P1을 고정 공개
+    메시지와 프론트의 원문 미표시로 차단하고 회귀 테스트 추가.
+  - 종료 상태와 write-behind 저장 사이 경합에서 빈 REST 배열이 SSE 기록을 지우던
+    P1을 서버 flush 대기 + 클라이언트 ID 병합으로 이중 보강.
+  - 최신 REST에 과거 SSE backlog를 적용할 때 상태가 역행하고 완료 에이전트가
+    thinking으로 남던 문제, 전체 재렌더의 포커스 유실, 화면 이동 후 늦은 응답이 현재
+    화면을 덮는 문제를 종료 상태 우선·포커스 복원·route/source 소유권 검사로 수정.
+  - 기본 팀 선택, 종료 정책 전체 표시, 본문/보조 열 비율, 합의 이벤트·에이전트 색상,
+    모바일 연결 텍스트, progressbar 상한과 문서의 URL·nullable team 의미를 정합화.
+- 검증: 전체 테스트 **474개, 3회 반복 통과**(5.890s / 5.906s / 5.913s),
+  `node --check`, 실제 `--fake --db` 서버의 redirect/HTML/JS MIME/제출→완료/저장
+  메시지·제안/팀 스냅샷/SSE result 스모크 통과. wheel에 정적 자산 3개 포함 확인.
+
+### 오류/이슈 (모두 수정 완료)
+- 초기 문서 패치가 실제 anchor 차이로 적용되지 않음 → 파일을 다시 읽고 작은 패치로
+  분리. JavaScript 작성 전 정적 테스트의 `/app/app.js` 404는 자산 추가 후 통과.
+- 완료 직후 테스트 helper가 제안만 보고 조기 반환해 메시지 write-behind 경합 노출 →
+  두 레코드가 모두 저장될 때까지 기다리도록 수정하고, 서버 자체 일관성 테스트 추가.
+- Windows가 `.js`를 `text/plain`으로 판정 → `text/javascript` MIME 등록. 정적 계약
+  테스트가 literal hash route를 요구 → 명시적 route 상수 추가.
+- venv에 setuptools가 없어 `--no-build-isolation` wheel 검사가 실패 → 정상 격리
+  빌드로 검증해 프로젝트 wheel과 정적 자산 포함을 확인.
+- 첫 실서버 스모크에서 PowerShell 7 전용 `SkipHttpErrorCheck`를 사용 → PowerShell
+  5.1 호환 `curl.exe` 상태 검사로 교체해 통과. 모든 임시 서버·DB는 정리.
+
+### 후속
+- localhost 전용·무인증 결정(D-012)을 유지한다. LAN 공유·공개 배포는 인증 설계와
+  함께 별도 마일스톤에서 검토한다.
+- SQLite 이벤트 페이지 단위 replay/compaction과 브라우저 실행형 E2E는 M5에서 보강.
+
 ## 2026-07-14 — M3 완료: FastAPI REST/SSE 서버 + 재시작 복원 (feat/m3-server)
 
 ### 진행한 작업
@@ -37,8 +78,8 @@
 
 ### 후속
 - SQLite 과거 이벤트의 페이지 단위 replay/compaction은 M5 견고화에서 처리.
-- M4 착수 시 JSON API와 충돌하지 않는 대시보드 URL namespace(`/app/...` 또는 hash)를 확정.
-- M3 PR #4 생성 — 리뷰 후 squash merge.
+- M4 URL namespace는 D-031의 `/app/#/...`로 확정·구현.
+- M3 PR #4는 `ca1b918`로 squash merge 완료.
 
 ## 2026-07-14 — M2b 완료: 실 세션 합의 성공 (feat/m2b-store)
 

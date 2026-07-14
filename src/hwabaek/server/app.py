@@ -1,4 +1,4 @@
-"""FastAPI 앱 조립 (M3).
+"""FastAPI 앱 조립 (M3 REST/SSE + M4 정적 대시보드).
 
 create_app은 store·팀 소스·LLM 팩토리 주입을 받아 앱을 만든다 — 테스트가 실
 OpenAI 클라이언트를 만들지 않도록 llm_factory_provider를 주입할 수 있게 한다.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import mimetypes
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from hwabaek.contracts import TeamConfig
 from hwabaek.server.api import router
@@ -31,6 +34,10 @@ if TYPE_CHECKING:
     from hwabaek.store.base import Store
 
 logger = logging.getLogger(__name__)
+DASHBOARD_DIR = Path(__file__).resolve().parents[1] / "dashboard"
+
+# Windows 레지스트리의 .js MIME이 text/plain인 환경에서도 ES module을 허용한다.
+mimetypes.add_type("text/javascript", ".js", strict=True)
 
 
 def default_clock() -> str:
@@ -63,7 +70,7 @@ def create_app(
     default_team: str = "default",
     interrupt_on_startup: bool = True,
 ) -> FastAPI:
-    """M3 서버 앱을 조립한다.
+    """REST/SSE 서버와 같은 origin의 M4 대시보드 앱을 조립한다.
 
     store가 None이면 영속화 없이 활성 세션만 관측하는 데모 모드로 동작한다.
     team_override를 주면 모든 세션이 그 팀을 쓰고 GET /teams도 그 팀만 보여준다
@@ -107,5 +114,15 @@ def create_app(
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/", include_in_schema=False)
+    async def dashboard_root() -> RedirectResponse:
+        return RedirectResponse(url="/app/", status_code=307)
+
+    app.mount(
+        "/app",
+        StaticFiles(directory=DASHBOARD_DIR, html=True),
+        name="dashboard",
+    )
 
     return app

@@ -76,6 +76,21 @@ class BlockingLLM:
         return text_response("unreachable")
 
 
+class SlowMessageStore:
+    """메시지 저장을 늦춰 종료 상태와 write-behind 완료 사이 경합을 재현한다."""
+
+    def __init__(self, inner, delay: float = 0.2) -> None:
+        self._inner = inner
+        self._delay = delay
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def append_message(self, message) -> None:
+        await asyncio.sleep(self._delay)
+        await self._inner.append_message(message)
+
+
 # ---------------------------------------------------------------------------
 # 팀/앱 조립 헬퍼
 # ---------------------------------------------------------------------------
@@ -157,7 +172,7 @@ class ServerApiTest(unittest.TestCase):
         detail = None
         while time.time() < deadline:
             detail = client.get(f"/sessions/{sid}").json()
-            if detail["proposals"]:
+            if detail["proposals"] and detail["messages"]:
                 return detail
             time.sleep(0.02)
         raise AssertionError(f"session {sid} records not persisted; last={detail}")
@@ -179,6 +194,8 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(detail["session"]["status"], "completed")
             self.assertEqual(detail["session"]["result"], "final report")
             self.assertEqual(detail["session"]["submitted_by"], "solo")
+            self.assertEqual(detail["team"]["name"], "demo")
+            self.assertEqual(detail["team"]["agents"][0]["name"], "solo")
             # store는 write-behind라 종료 직후 잠시 뒤에 영속화가 완결된다 —
             # 제안 레코드가 반영될 때까지 짧게 대기해 조회한다.
             detail = self._wait_persisted(client, sid)
@@ -187,6 +204,20 @@ class ServerApiTest(unittest.TestCase):
             self.assertIn("result_proposal", types)
             # 제안 이력 1건.
             self.assertEqual(len(detail["proposals"]), 1)
+
+    def test_terminal_detail_waits_for_write_behind_records(self) -> None:
+        """종료 상세는 저장 플러시가 끝난 일관된 메시지·제안을 반환한다."""
+        provider, _ = self._submit_provider("final report")
+        store = SlowMessageStore(self._store())
+        app = self._app(store=store, provider=provider, team_override=_first_team())
+
+        with TestClient(app) as client:
+            created = client.post("/sessions", json={"task": "slow persistence"})
+            detail = self._wait_terminal(client, created.json()["id"])
+
+            self.assertEqual(detail["session"]["status"], "completed")
+            self.assertTrue(detail["messages"])
+            self.assertTrue(detail["proposals"])
 
     # -----------------------------------------------------------------------
     # 2) 세션 목록
@@ -303,6 +334,32 @@ class ServerApiTest(unittest.TestCase):
     # -----------------------------------------------------------------------
     # 9) 서버 시작 시 interrupted 처리 (D-021)
     # -----------------------------------------------------------------------
+    def test_invalid_team_config_does_not_leak_source_or_path(self) -> None:
+        """잘못된 YAML의 원문과 절대 경로를 REST 오류에 포함하지 않는다."""
+        config_dir = Path(self._tmp.name) / "bad-configs"
+        config_dir.mkdir()
+        secret = "sk-TEST_SECRET_123"
+        config_path = config_dir / "secret.yaml"
+        config_path.write_text(
+            f"name: demo\ndescription: [{secret}\n",
+            encoding="utf-8",
+        )
+        app = self._app(store=self._store(), teams_dir=str(config_dir))
+
+        with TestClient(app) as client:
+            for response in (
+                client.get("/teams"),
+                client.post("/sessions", json={"task": "test"}),
+            ):
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json(),
+                    {"detail": "team configuration is invalid"},
+                )
+                serialized = response.text
+                self.assertNotIn(secret, serialized)
+                self.assertNotIn(str(config_path), serialized)
+
     def test_startup_marks_interrupted(self) -> None:
         # 이전 실행의 running 세션을 store에 심어 둔다.
         seed_store = self._store()

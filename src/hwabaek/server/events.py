@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from hwabaek.config import list_team_configs
+from hwabaek.config import ConfigError, list_team_configs
 from hwabaek.contracts import (
     AgentSpec,
     Event,
@@ -45,6 +45,35 @@ DEFAULT_SUBSCRIBER_QUEUE_SIZE = 512
 # (team, task) -> per-agent LLM 팩토리. 실/가짜/스크립트 주입 지점 — 테스트가 실
 # OpenAI 클라이언트를 만들지 않도록 서버 조립이 이 주입을 허용한다.
 LLMFactoryProvider = Callable[[TeamConfig, str], Callable[["AgentSpec"], "LLMClient"]]
+
+
+def team_summary(team: TeamConfig) -> dict:
+    """대시보드에 노출할 팀 설정 요약. 시스템 프롬프트는 포함하지 않는다."""
+    return {
+        "name": team.name,
+        "description": team.description,
+        "default_model": team.default_model,
+        "agents": [
+            {
+                "name": agent.name,
+                "role": agent.role,
+                "model": agent.model or team.default_model,
+                "max_turns": agent.max_turns,
+                "capabilities": sorted(c.value for c in agent.capabilities),
+            }
+            for agent in team.agents
+        ],
+        "termination": {
+            "max_messages": team.termination.max_messages,
+            "token_budget": team.termination.token_budget,
+            "idle_timeout": team.termination.idle_timeout,
+            "approval": {
+                "mode": team.termination.approval.mode.value,
+                "voting_timeout": team.termination.approval.voting_timeout,
+                "minimum_votes": team.termination.approval.minimum_votes,
+            },
+        },
+    }
 
 
 class ServerError(Exception):
@@ -318,6 +347,11 @@ class SessionRegistry:
         session = await self.current_session(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        runner = self.get_runner(session_id)
+        if runner is not None and session.finished_at is not None and not runner.done:
+            # 종료 상태는 write-behind 저장이 모두 끝난 뒤 반환해 혼합 스냅샷을 피한다.
+            await runner.wait_done()
+            session = runner.session
         messages: list = []
         proposals: list = []
         votes: list = []
@@ -325,8 +359,18 @@ class SessionRegistry:
             messages = await self._store.list_messages(session_id)
             proposals = await self._store.list_proposals(session_id)
             votes = await self._store.list_votes(session_id)
+        team: TeamConfig | None = None
+        if self._store is not None:
+            team = await self._store.get_team_snapshot(session_id)
+        if team is None:
+            try:
+                team = await self._resolve_team(session.team_name)
+            except (ConfigError, UnknownTeamError):
+                # 과거 세션의 팀 설정 파일이 삭제됐고 snapshot도 없을 수 있다.
+                team = None
         return {
             "session": session.to_dict(),
+            "team": team_summary(team) if team is not None else None,
             "messages": [m.to_dict() for m in messages],
             "proposals": [p.to_dict() for p in proposals],
             "votes": [v.to_dict() for v in votes],

@@ -1,9 +1,9 @@
-"""REST + SSE 라우트 (M3).
+"""REST + SSE 라우트와 대시보드용 응답 (M3/M4).
 
 엔드포인트:
 - POST /sessions              태스크 제출 (동시 세션 1개 검사+생성 원자화)
 - GET  /sessions              저장된 세션 목록
-- GET  /sessions/{id}         세션 상세 (상태·결과·사용량 + 메시지·제안·투표)
+- GET  /sessions/{id}         세션 상세 (상태·팀 요약·결과·사용량 + 메시지·제안·투표)
 - POST /sessions/{id}/cancel  실행 중 세션 취소
 - GET  /teams                 팀 설정 목록 (이름·에이전트 요약)
 - GET  /sessions/{id}/events  SSE 이벤트 스트림 (Last-Event-ID 재전송)
@@ -17,13 +17,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from hwabaek.config import ConfigError
-from hwabaek.contracts import TeamConfig
 from hwabaek.server.events import (
     ConcurrentSessionError,
     SessionNotActiveError,
     SessionNotFoundError,
     SessionRegistry,
     UnknownTeamError,
+    team_summary,
 )
 
 router = APIRouter()
@@ -55,34 +55,6 @@ def _error(response: Response, code: int, message: str) -> dict:
     return {"detail": message}
 
 
-def _team_summary(team: TeamConfig) -> dict:
-    """팀 설정을 이름·에이전트 요약 dict로 변환한다 (GET /teams용)."""
-    return {
-        "name": team.name,
-        "description": team.description,
-        "default_model": team.default_model,
-        "agents": [
-            {
-                "name": agent.name,
-                "role": agent.role,
-                "model": agent.model or team.default_model,
-                "capabilities": sorted(c.value for c in agent.capabilities),
-            }
-            for agent in team.agents
-        ],
-        "termination": {
-            "max_messages": team.termination.max_messages,
-            "token_budget": team.termination.token_budget,
-            "idle_timeout": team.termination.idle_timeout,
-            "approval": {
-                "mode": team.termination.approval.mode.value,
-                "voting_timeout": team.termination.approval.voting_timeout,
-                "minimum_votes": team.termination.approval.minimum_votes,
-            },
-        },
-    }
-
-
 @router.post("/sessions")
 async def create_session(
     body: CreateSessionRequest, request: Request, response: Response
@@ -95,8 +67,13 @@ async def create_session(
         return _error(response, status.HTTP_409_CONFLICT, str(exc))
     except UnknownTeamError as exc:
         return _error(response, status.HTTP_400_BAD_REQUEST, str(exc))
-    except ConfigError as exc:
-        return _error(response, status.HTTP_400_BAD_REQUEST, str(exc))
+    except ConfigError:
+        # YAML 파서 오류에는 원문 줄과 절대 경로가 포함될 수 있으므로 외부에 노출하지 않는다.
+        return _error(
+            response,
+            status.HTTP_400_BAD_REQUEST,
+            "team configuration is invalid",
+        )
     response.status_code = status.HTTP_201_CREATED
     return session.to_dict()
 
@@ -112,7 +89,7 @@ async def list_sessions(request: Request, limit: int = 50) -> dict:
 
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, request: Request, response: Response) -> dict:
-    """세션 상세 — 상태·결과·사용량과 메시지 타임라인·제안·투표."""
+    """세션 상세 — 상태·nullable 팀 요약·사용량과 메시지·제안·투표."""
     registry = _registry(request)
     try:
         return await registry.get_session_detail(session_id)
@@ -141,9 +118,14 @@ async def list_teams(request: Request, response: Response) -> dict:
     registry = _registry(request)
     try:
         teams = await registry.list_teams()
-    except ConfigError as exc:
-        return _error(response, status.HTTP_400_BAD_REQUEST, str(exc))
-    return {"teams": [_team_summary(t) for t in teams]}
+    except ConfigError:
+        # 설정 원문에는 API 키 같은 비밀값이 있을 수 있다.
+        return _error(
+            response,
+            status.HTTP_400_BAD_REQUEST,
+            "team configuration is invalid",
+        )
+    return {"teams": [team_summary(t) for t in teams]}
 
 
 def _parse_last_event_id(raw: str | None) -> int:

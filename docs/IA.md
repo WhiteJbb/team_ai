@@ -11,9 +11,9 @@
 - 최근 세션 요약 카드 (최근 5건, 상태 뱃지)
 
 ### SC-02 세션 목록
-- 전체 세션 테이블: id, 태스크 요약, 상태(running/voting/completed/failed/cancelled), 시작 시각, 토큰 사용량
+- 최근 최대 200개 세션 테이블: 태스크 요약, 팀, 상태(running/voting/completed/failed/cancelled), 시작 시각, 토큰 사용량
 - failed는 사유 병기 (예: `failed (budget)`, `failed (no_quorum)`)
-- 행 클릭 → SC-03
+- 태스크 링크 클릭 → SC-03
 
 ### SC-03 세션 상세 (핵심 화면)
 - 상단: 태스크 내용, 상태, 경과 시간, 누적 토큰/예산 게이지, 취소 버튼
@@ -38,16 +38,17 @@ SC-01 홈/제출 ──제출──> SC-03 세션 상세 (실시간 관찰)
    │                        │
    ├──최근 세션 클릭─────────┘
    │
-   └──> SC-02 세션 목록 ──행 클릭──> SC-03
+   └──> SC-02 세션 목록 ──태스크 클릭──> SC-03
    └──> SC-04 팀 설정 뷰
 ```
 
 ## 내비게이션
 
 - 상단 고정 내비: 홈(제출) / 세션 / 팀
-- 세션 상세는 브라우저에서 직접 링크 가능해야 한다. M4 UI URL은 JSON API
-  (`/sessions/{id}`)와 충돌하지 않는 별도 namespace로 정하고, 새로고침 시 REST
-  스냅샷 복원 후 SSE 전체 backlog를 재구독한다.
+- 세션 상세는 `/app/#/sessions/{id}`로 직접 링크한다. JSON API
+  (`/sessions/{id}`)와 충돌하지 않으며, 새로고침 시 REST 스냅샷 복원 후 SSE 전체
+  backlog를 재구독한다.
+- 화면 URL: 홈 `/app/#/`, 세션 목록 `/app/#/sessions`, 팀 `/app/#/teams`.
 
 ## M3 서버 데이터 연결
 
@@ -58,7 +59,9 @@ SC-01 홈/제출 ──제출──> SC-03 세션 상세 (실시간 관찰)
 | SC-03 세션 상세 | `GET /sessions/{id}` 후 `GET /sessions/{id}/events` 구독, 취소는 `POST /sessions/{id}/cancel` |
 | SC-04 팀 설정 | `GET /teams` |
 
-- `GET /sessions/{id}`는 세션 스냅샷과 메시지·제안·투표 이력을 복원한다.
+- `GET /sessions/{id}`는 세션과 메시지·제안·투표 이력을 복원한다. `team`은 가능하면
+  실행 당시 저장한 스냅샷이며, 레거시·무저장 세션은 현재 설정으로 보완하고 둘 다
+  없으면 `null`이다.
 - SSE 최초 구독은 헤더 없이 전체 이벤트 backlog를 받은 뒤 라이브 이벤트로 이어진다.
   재연결할 때는 마지막으로 적용한 이벤트의 `sequence`를 `Last-Event-ID`에 넣고,
   서버가 그보다 큰 sequence부터 재전송한다.

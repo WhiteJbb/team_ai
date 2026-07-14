@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f2ead9">
+    <meta name="description" content="여러 에이전트가 함께 논의하고 합의하는 화백 대시보드">
+    <title>화백 — 함께 숙고하는 에이전트 회의</title>
+    <link rel="stylesheet" href="/app/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#route-view">본문으로 건너뛰기</a>
+
+    <div id="app-shell" class="app-shell">
+      <header class="site-header">
+        <a class="wordmark" href="#/" aria-label="화백 홈">
+          <span class="wordmark-seal" aria-hidden="true">和</span>
+          <span class="wordmark-copy">
+            <strong>화백</strong>
+            <small>함께 숙고하는 회의</small>
+          </span>
+        </a>
+
+        <nav id="primary-nav" class="primary-nav" aria-label="주요 메뉴">
+          <a href="#/">홈</a>
+          <a href="#/sessions">세션</a>
+          <a href="#/teams">팀</a>
+        </nav>
+
+        <div id="connection-status" class="connection-status" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span>서버 확인 중</span>
+        </div>
+      </header>
+
+      <main id="route-view" class="route-view" tabindex="-1">
+        <section class="page" aria-labelledby="loading-title" aria-busy="true">
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">회의 준비</p>
+              <h1 id="loading-title">화백을 불러오는 중입니다</h1>
+            </div>
+          </header>
+          <div class="panel" aria-hidden="true">
+            <div class="skeleton skeleton-title"></div>
+            <div class="skeleton"></div>
+            <div class="skeleton skeleton-short"></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p><span aria-hidden="true">和而不同</span><span class="visually-hidden">화이부동</span> — 뜻을 모으되, 관점은 지킵니다.</p>
+        <p>로컬에서 운영되는 에이전트 합의 도구</p>
+      </footer>
+    </div>
+
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="live-region" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="/app/app.js"></script>
+  </body>
+</html>

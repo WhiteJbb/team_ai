@@ -90,7 +90,7 @@ agents:                  # 1명 이상
 | M2a | 코어 엔진 (버스/에이전트 루프/합의/종료 정책, 인메모리) | ✅ 완료 |
 | M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | ✅ 완료 |
 | M3 | 서버 (FastAPI REST + SSE) | ✅ 완료 |
-| M4 | 웹 대시보드 | 예정 |
+| M4 | 웹 대시보드 | ✅ 완료 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
 | M6 | 확장 실험 (외부 워커, 도구, 도트 월드 UI) | 후순위 |
 
@@ -121,9 +121,9 @@ agents:                  # 1명 이상
 
 세션 이벤트가 콘솔에 실시간 출력되고, 종료 시 상태·결과(또는 미승인 초안)·토큰
 사용량이 표시됩니다. 세션 기록은 기본적으로 SQLite(`data/hwabaek.db`)에
-저장됩니다 — 경로는 `--db`, 비활성화는 `--no-db`. 웹 대시보드는 M4에서 제공됩니다.
+저장됩니다 — 경로는 `--db`, 비활성화는 `--no-db`.
 
-## 서버 실행 (M3)
+## 서버와 웹 대시보드 실행 (M3/M4)
 
 `python -m hwabaek.serve`로 REST + SSE 서버를 띄웁니다. **localhost(127.0.0.1)
 전용으로 고정**되며 인증 계층은 없습니다(D-012) — 외부에 노출하지 않습니다.
@@ -151,6 +151,12 @@ agents:                  # 1명 이상
 `--no-db`에서는 현재/가장 최근 세션 스냅샷과 SSE backlog만 메모리에 남고,
 메시지·제안·투표 상세 배열은 저장하지 않으며 다음 세션이나 재시작 시 사라집니다.
 
+서버가 뜨면 같은 PC의 브라우저에서 <http://127.0.0.1:8000/>을 엽니다. 홈에서
+태스크와 팀을 골라 세션을 시작하고, 상세 화면에서 에이전트 상태·논의·표결·토큰
+사용량과 최종 결과를 실시간으로 볼 수 있습니다. `세션`은 최근 200개 기록,
+`팀`은 YAML 팀 구성을 읽기 전용으로 보여 줍니다. 대시보드는 인증 없는 localhost
+전용이며 같은 PC에서만 사용합니다. LAN 공유·공개 호스팅은 M4 범위가 아닙니다.
+
 PowerShell 5.1에서 태스크 제출 → 조회 최소 예시:
 
 ```powershell
@@ -172,13 +178,16 @@ curl.exe -N -H 'Last-Event-ID: 1' "http://127.0.0.1:8000/sessions/$sessionId/eve
 | `GET /health` | 200 `{"status":"ok"}` | — |
 | `POST /sessions` | 201, 평면 Session | 잘못된 팀 400, 실행 중 세션 409, 잘못된 body 422 |
 | `GET /sessions?limit=50` | 200 `{"sessions": [...]}` (`limit` 1~200 보정) | — |
-| `GET /sessions/{id}` | 200 `{"session": ..., "messages": [...], "proposals": [...], "votes": [...]}` | 없음 404 |
+| `GET /sessions/{id}` | 200 `{"session": ..., "team": ..., "messages": [...], "proposals": [...], "votes": [...]}` | 없음 404 |
 | `POST /sessions/{id}/cancel` | 200, 평면 Session | 없음 404, 종료 세션 409 |
 | `GET /teams` | 200 `{"teams": [...]}` | 설정 오류 400 |
 | `GET /sessions/{id}/events` | 200 SSE; 종료 세션은 backlog 후 연결 종료 | 잘못된 `Last-Event-ID` 400, 없음 404 |
 
 SSE의 정확한 와이어 형식과 재구독 규칙은
 [docs/EventContract.md](docs/EventContract.md)를 참조하세요.
+상세 응답의 `team`은 가능하면 실행 당시 저장한 스냅샷이며, 레거시·무저장
+세션은 현재 설정으로 보완합니다. 둘 다 없으면 `null`입니다. 시스템 프롬프트는
+응답에 포함하지 않습니다.
 
 ## 개발 환경 (Windows)
 
