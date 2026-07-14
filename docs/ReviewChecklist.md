@@ -54,6 +54,30 @@
 - [x] README·Plan·IA·UserScenarios·EventContract·DecisionLog·WorkLog 정합
 - [x] `fix/m5-decision-reserve` 브랜치 사용, git 산출물 AI 흔적 없음
 
+## M5.3 검증 기록 (2026-07-14)
+
+- [x] voting 호출을 시작 당시 제안 버전에 귀속하고 해소된 버전의 호출·예약 취소
+- [x] 느린 v1 심의자, v1 반려, v2 재투표 경합과 늦은 v1 응답의 v2 오염 방지 검증
+- [x] 전체 508개 테스트, Python compileall, `git diff --check` 통과
+- [x] PR #8 squash merge 완료 (`bfe01c4`)
+
+## M5.4 검증 기록 (2026-07-15)
+
+- [x] voting 호출에 불변 제안 본문을 보장하고 정상 inbox 경로의 중복 방지
+- [x] discussion에서 시작해 voting에 늦게 도착한 투표의 거부·정상 재시도 검증
+- [x] 전체 510개 테스트, Python compileall, `git diff --check` 통과
+- [x] PR #9 squash merge 완료 (`5af88e0`)
+
+## M5.5 검증 기록 (2026-07-15)
+
+- [x] 성공 메시지 뒤 대기하고 새 팀 입력 뒤에만 추론을 재개하는 경로 검증
+- [x] voting 문맥이 원래 작업·활성 제안·직전 교정 피드백만 보존하는지 검증
+- [x] 전체 510개 테스트, Python compileall, `git diff --check` 통과
+- [x] 실안건 `7248a205-000000`: 첫 제안 작업 22,194, 최종 작업 29,459,
+  전체 처리 32,531, 제안 1건과 심의자 2명 승인으로 완료
+- [x] PR #10 squash merge 완료 (`d4ad836`)
+- [ ] 대표 기술 안건 10건의 수렴·사용량 완료 기준 충족 여부 확정
+
 ## 기능/정확성
 
 - [ ] 전체 테스트 통과: `.venv\Scripts\python.exe -m unittest discover -s tests`
