@@ -48,8 +48,13 @@ def _make_id_factory():
 
 
 def _print_event(event: Event) -> None:
-    """이벤트를 한 줄 요약으로 출력한다 (영어 ASCII)."""
+    """이벤트를 한 줄 요약으로 출력한다 (영어 ASCII, HH:MM:SS 타임스탬프).
+
+    타임스탬프는 실 세션 디버깅용이다 — 타이머(idle/voting) 만료나 응답 지연이
+    어느 구간에서 발생했는지 sequence만으로는 알 수 없다.
+    """
     p = event.payload
+    clock = event.created_at[11:19] if len(event.created_at) >= 19 else "--:--:--"
     if event.type is EventType.SESSION_STATUS:
         line = f"session -> {p['status']}"
         if p.get("fail_reason"):
@@ -73,7 +78,7 @@ def _print_event(event: Event) -> None:
         )
     else:  # RESULT
         line = f"result by {p['submitted_by']}"
-    print(f"[{event.sequence:04d}] {line}")
+    print(f"[{event.sequence:04d} {clock}] {line}")
 
 
 def _fake_team() -> TeamConfig:

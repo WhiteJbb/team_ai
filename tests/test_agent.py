@@ -53,9 +53,12 @@ class MergeBatchTest(unittest.TestCase):
             )
         ])
         self.assertIn("[result proposal from proposer]", merged)
+        # 활성 제안 id를 명시한다 — 심의자가 id를 지어내 투표하는 것을 방지.
+        self.assertIn("(proposal_id: p-1)", merged)
         self.assertIn("final draft", merged)
         self.assertIn("[action required]", merged)
         self.assertIn("vote_result", merged)
+        self.assertIn("omit proposal_id", merged)
         # 채팅은 투표가 아님을 명시한다.
         self.assertIn("does NOT count as a vote", merged)
 

@@ -282,6 +282,64 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("you have NOT voted", tool_outputs)
 
+    async def test_bogus_proposal_id_vote_gets_corrective_result(self) -> None:
+        """지어낸 proposal_id로 투표하면 무시 대신 활성 제안 id를 알려주는 교정
+        메시지를 받고, 재투표(id 생략)로 합의가 완료된다 (실 스모크 대응)."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [_submit("the deliverable")]),
+                ("analyst", [
+                    _text(),
+                    _vote("approve", proposal_id="made-up-id"),
+                    _vote("approve"),
+                ]),
+                ("reviewer", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        # 교정 메시지: 무시 사실 + 활성 제안 id + 재시도 방법.
+        self.assertIn("made-up-id", tool_outputs)
+        self.assertIn("ACTIVE proposal", tool_outputs)
+        self.assertIn("omit proposal_id", tool_outputs)
+        # 두 번째(정상) 투표는 기록된다.
+        self.assertIn("vote recorded (approve)", tool_outputs)
+
+    async def test_tool_error_is_visible_as_agent_state_detail(self) -> None:
+        """도구 오류(예: running 중 vote_result)는 agent_state 이벤트 detail로
+        노출된다 — 실 세션에서 심의자의 투표 실패가 무흔적이었던 것에 대한 관측."""
+        manager, coll, _ = self._build(
+            [
+                ("writer", [
+                    _vote("approve"),  # running 중 투표 -> 상태 위반 ToolError
+                    _submit("the deliverable"),
+                ]),
+                ("analyst", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        details = [
+            e.payload.get("detail") or "" for e in coll.agent_states()
+            if e.payload["agent"] == "writer"
+        ]
+        self.assertTrue(
+            any(d.startswith("tool error [vote_result]") for d in details),
+            f"no tool error detail in {details}",
+        )
+
     async def test_running_chat_has_no_vote_reminder(self) -> None:
         """running 중(활성 제안 없음) 채팅에는 리마인더가 붙지 않는다."""
         manager, _, fakes = self._build(

@@ -252,9 +252,11 @@ class SessionManager:
             and sender in state.tally.pending
         ):
             result += (
-                "; reminder: you have NOT voted on the active proposal yet - "
-                "call vote_result (approve or reject) before the voting "
-                "timeout, or you will be counted as abstaining"
+                "; reminder: you have NOT voted on the active proposal "
+                f"{state.proposal.id} (version {state.proposal.version}) yet - "
+                "call vote_result (approve or reject, proposal_id may be "
+                "omitted) before the voting timeout, or you will be counted "
+                "as abstaining"
             )
         return result
 
@@ -321,7 +323,19 @@ class SessionManager:
         except ContractError as error:
             raise ToolError(str(error)) from error
         if result is None:
-            return "vote ignored: stale or unknown proposal"
+            # 잘못된(지어낸) proposal_id는 막다른 응답 대신 교정 정보를 준다 —
+            # 실 스모크에서 심의자가 "unknown proposal"만 반복 수신하고 활성
+            # 제안이 없다고 오판해 투표를 포기한 것에 대한 대응.
+            active = self._consensus.active
+            if active is not None:
+                return (
+                    f"vote ignored: proposal id {proposal_id!r} is stale or "
+                    f"unknown. The ACTIVE proposal is {active.proposal.id} "
+                    f"(version {active.proposal.version}, by "
+                    f"{active.proposal.proposer}). Call vote_result again and "
+                    "omit proposal_id to vote on it."
+                )
+            return "vote ignored: stale or unknown proposal (none active)"
         vote, state = result
         if self._store is not None:
             self._enqueue_write(lambda: self._store.append_vote(vote))

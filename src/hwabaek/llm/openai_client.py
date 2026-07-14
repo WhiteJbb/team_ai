@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 import openai
 
 from hwabaek.contracts import Usage
@@ -59,6 +60,14 @@ from hwabaek.llm.chatgpt_auth import (
 
 # 캐시 최소 수명 — SDK가 현재 허용하는 유일한 값("30m", Research §6).
 _CACHE_TTL = "30m"
+
+# 구독(chatgpt_oauth) 스트리밍 클라이언트의 명시적 타임아웃 — 실 세션에서 에이전트
+# 1명이 스트림 무응답으로 세션 내내 THINKING에 갇힌 것에 대한 방어. read는 SSE
+# 청크 사이 간격에 적용되므로, 간격이 이 값을 넘으면 LLMTimeoutError로 정규화되어
+# 에이전트가 dead 처리되고 세션은 지속된다 (무한 대기 방지 — 실패 경로가 제품이다).
+# api_key(비스트리밍) 모드는 SDK 기본(600s)을 유지한다 — 전체 응답 대기에 read가
+# 통째로 적용되므로 짧게 잡으면 긴 생성이 오탐된다.
+_CHATGPT_TIMEOUT = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
 
 # 인증 모드(D-026) — api_key(기본·공식) | chatgpt_oauth(구독 device flow).
 AUTH_API_KEY = "api_key"
@@ -497,6 +506,7 @@ class OpenAIClient:
             api_key=access_token,
             base_url=base_url or CHATGPT_API_BASE,
             default_headers=headers,
+            timeout=_CHATGPT_TIMEOUT,
         )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:

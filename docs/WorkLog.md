@@ -2,6 +2,39 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b: 실 세션 3차 분석(DB 실증) — 관측성·타임아웃·투표 UX 보강 (feat/m2b-store)
+
+### 진행한 작업
+- 렌더링/넛지 반영 후 3차 실 세션도 no_quorum. 저장된 세션 DB(events)를 직접
+  조회해 타임라인 실증:
+  - **critic**: voting 시작(10:52:45) 후 25초 만에 max_turns 15회 소진
+    (10:53:10 "max_turns exhausted") — 그 뒤로는 투표가 물리적으로 불가능한
+    상태에서 voting_timeout(120s)까지 대기 후 기권 처리.
+  - **research**: 첫 LLM 호출(10:52:17)이 세션 종료(10:54:47, 150초)까지
+    미완료 — 스트림 무응답으로 세션 내내 THINKING에 갇힘.
+  - 코드 버전 검증: 04bcbcb 커밋(19:50:59 KST) < 세션 시작(19:52:17 KST) —
+    렌더링/넛지가 적용된 상태에서 발생.
+- 보강 4건:
+  1. **도구 오류 관측성** (agent.py): ToolError를 모델에게만 돌려주고 이벤트
+     무흔적이던 것을 agent_state detail(`tool error [vote_result]: ...`)로
+     노출 — 심의자의 투표 실패 여부를 다음 실 세션부터 로그·DB로 확인 가능.
+  2. **투표 교정 응답** (session.py): 잘못된/지어낸 proposal_id 투표에
+     "vote ignored" 대신 활성 제안 id·버전·제출자와 재시도 방법을 안내.
+  3. **스트림 타임아웃** (openai_client.py): 구독 클라이언트에 명시적
+     httpx.Timeout(connect 15/read 180/write 30) — 청크 간격이 read를 넘으면
+     LLMTimeoutError로 정규화되어 dead 처리, 무한 THINKING 방지.
+  4. **CLI 타임스탬프** (run.py): 이벤트 라인에 HH:MM:SS 표시(타이머 디버깅).
+  merge_batch 제안 렌더링에 proposal_id 명시, 미투표 리마인더에 활성 제안
+  id·버전 포함.
+- 테스트 3개 추가(총 **447개 통과**, 핵심 모듈 3회 반복 안정).
+
+### 남은 것 / 사용자 결정 필요
+- critic이 채팅으로 턴을 소진해 투표 불능이 되는 문제의 구조적 대응:
+  max_turns 상향(15→20+) 여부, voting 중 심의자 채팅 정책(D-024) 재검토 여부.
+- unanimous 모드에서 심의자 1명이 hang/dead이면 no_quorum이 보장되는 문제:
+  기본 팀을 participating_unanimous(+minimum_votes)로 바꿀지 여부.
+- 다음 실 세션에서 tool error detail 관측으로 critic의 투표 실패 원인 확정.
+
 ## 2026-07-14 — M2b: 실 세션 no_quorum 대응 — 제안/투표 렌더링과 미투표 넛지 (feat/m2b-store)
 
 ### 진행한 작업

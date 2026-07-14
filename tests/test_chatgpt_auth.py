@@ -369,6 +369,17 @@ class ChatGPTOAuthClientConstructionTest(unittest.TestCase):
         self.assertEqual(inner.api_key, FAKE_ACCESS)
         self.assertNotIn(FAKE_ACCESS, repr(client))
 
+    def test_construction_sets_explicit_stream_timeout(self) -> None:
+        # 스트림 무응답으로 에이전트가 무한 THINKING에 갇히지 않게(실 세션 관측)
+        # 구독 클라이언트에는 명시적 read 타임아웃을 건다.
+        client = OpenAIClient(
+            auth_mode="chatgpt_oauth",
+            token_provider=_StubProvider(FAKE_ACCESS, "acct_9"),
+        )
+        timeout = client._client.timeout
+        self.assertEqual(timeout.read, 180.0)
+        self.assertEqual(timeout.connect, 15.0)
+
     def test_construction_without_account_id_omits_header(self) -> None:
         client = OpenAIClient(
             auth_mode="chatgpt_oauth",

@@ -140,10 +140,12 @@ def merge_batch(messages: list[Message]) -> str:
     for message in messages:
         if message.type is MessageType.RESULT_PROPOSAL:
             parts.append(
-                f"[result proposal from {message.sender}]\n{message.content}\n"
+                f"[result proposal from {message.sender}] "
+                f"(proposal_id: {message.proposal_id})\n{message.content}\n"
                 "[action required] The session is now VOTING on the proposal "
                 "above. If you have the vote_result tool, cast your vote NOW "
-                "(approve, or reject with a concrete reason). Discussion is "
+                "(approve, or reject with a concrete reason); you may omit "
+                "proposal_id to vote on this active proposal. Discussion is "
                 "allowed, but a chat message does NOT count as a vote, and "
                 "unvoted members are treated as abstaining when the voting "
                 "timeout expires."
@@ -283,6 +285,14 @@ class AgentLoop:
             output = self._dispatch(call)
             return ToolResult(tool_call_id=call.id, content=output)
         except (ToolError, ContractError) as error:
+            # 관측: 도구 오류는 모델에게만 반환되고 이벤트로는 보이지 않아 실 세션
+            # 디버깅이 불가능했다(예: 심의자의 vote_result 실패가 로그에 무흔적).
+            # 상태는 그대로 THINKING이되 detail로 오류를 노출한다.
+            self._hooks.on_state(
+                self.name,
+                AgentState.THINKING,
+                detail=f"tool error [{call.name}]: {str(error)[:120]}",
+            )
             return ToolResult(
                 tool_call_id=call.id, content=str(error), is_error=True
             )
