@@ -49,16 +49,49 @@ from hwabaek.llm.base import (
     StopReason,
     ToolCall,
 )
+from hwabaek.llm.chatgpt_auth import (
+    CHATGPT_ACCOUNT_ID_HEADER,
+    CHATGPT_API_BASE,
+    DEFAULT_ORIGINATOR,
+    DEFAULT_USER_AGENT,
+    ChatGPTTokenProvider,
+)
 
 # 캐시 최소 수명 — SDK가 현재 허용하는 유일한 값("30m", Research §6).
 _CACHE_TTL = "30m"
+
+# 인증 모드(D-026) — api_key(기본·공식) | chatgpt_oauth(구독 device flow).
+AUTH_API_KEY = "api_key"
+AUTH_CHATGPT_OAUTH = "chatgpt_oauth"
+
+# chatgpt_oauth(구독) 백엔드가 허용하는 top-level 필드 화이트리스트.
+# litellm chatgpt/responses/transformation.py의 allowed_keys와 동일하게 확정했다 —
+# 이 집합 밖의 필드(max_output_tokens, metadata, prompt_cache_options 등)는 구독
+# 백엔드가 거부하므로 제거한다. 토큰 예산은 사후 집계로 강제한다(D-026: 사전 상한 불가).
+_CHATGPT_ALLOWED_KEYS = frozenset(
+    {
+        "model",
+        "input",
+        "instructions",
+        "stream",
+        "store",
+        "include",
+        "tools",
+        "tool_choice",
+        "reasoning",
+        "previous_response_id",
+        "truncation",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # 요청 매핑 — LLMRequest -> responses.create kwargs
 # ---------------------------------------------------------------------------
 
-def build_request_payload(request: LLMRequest) -> dict[str, Any]:
+def build_request_payload(
+    request: LLMRequest, *, auth_mode: str = AUTH_API_KEY
+) -> dict[str, Any]:
     """LLMRequest를 responses.create 호출 kwargs(dict)로 변환한다.
 
     - system_prompt -> instructions
@@ -66,7 +99,9 @@ def build_request_payload(request: LLMRequest) -> dict[str, Any]:
     - tools -> function 도구 정의
     - cache_system_prefix -> prompt_cache_options + 접두사 끝 명시적 breakpoint
 
-    순수 함수다(네트워크·시계 없음) — 밀폐 단위 검증 대상.
+    auth_mode가 chatgpt_oauth면 구독 백엔드가 거부하는 top-level 필드
+    (max_output_tokens, prompt_cache_options 등)를 화이트리스트로 제거한다 — 나머지
+    매핑은 api_key 모드와 동일하다(순수 함수, 네트워크·시계 없음).
     """
     payload: dict[str, Any] = {
         "model": request.model,
@@ -80,6 +115,9 @@ def build_request_payload(request: LLMRequest) -> dict[str, Any]:
         # 캐싱을 명시적으로 opt-in한다(30분 최소 수명). 명시적 breakpoint는 접두사
         # 끝(첫 텍스트 블록)에 함께 부여했다 — _build_input 참조.
         payload["prompt_cache_options"] = {"ttl": _CACHE_TTL}
+    if auth_mode == AUTH_CHATGPT_OAUTH:
+        # 구독 백엔드는 화이트리스트 외 필드를 거부한다(litellm 확정) — 제거한다.
+        payload = {k: v for k, v in payload.items() if k in _CHATGPT_ALLOWED_KEYS}
     return payload
 
 
