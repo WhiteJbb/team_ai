@@ -23,7 +23,21 @@ def _write(directory: Path, filename: str, content: str) -> Path:
     return path
 
 
+# 최소 에이전트 블록 — 2인 팀. approval mode가 first가 아닌 한 최소 2인이
+# 필요하다(D-018: 제출자는 자기 제안에 투표할 수 없음)는 계약 요건 때문에,
+# 여러 케이스에서 재사용하는 이 최소 블록도 2인으로 구성한다.
 MINIMAL_AGENT_BLOCK = """
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent. respond in the language of the task.
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant. respond in the language of the task.
+"""
+
+# 1인 팀 전용 블록 — approval mode가 first일 때만 허용됨을 검증하는 케이스에서 쓴다.
+SOLO_AGENT_BLOCK = """
 agents:
   - name: solo
     role: does everything
@@ -32,7 +46,7 @@ agents:
 
 
 class LoadTeamConfigValidCasesTest(unittest.TestCase):
-    """정상 로드 경로 — 전 필드 명시 / 선택 필드 생략."""
+    """정상 로드 경로 — 전 필드 명시 / 선택 필드 생략 / approval 신구 형식."""
 
     def test_loads_with_all_fields_explicit(self) -> None:
         content = """
@@ -64,7 +78,9 @@ agents:
         self.assertEqual(team.termination.max_messages, 42)
         self.assertEqual(team.termination.token_budget, 12345)
         self.assertEqual(team.termination.idle_timeout, 5.5)
-        self.assertEqual(team.termination.approval, ApprovalPolicy.MAJORITY)
+        self.assertEqual(team.termination.approval.mode, ApprovalPolicy.MAJORITY)
+        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertIsNone(team.termination.approval.minimum_votes)
         self.assertEqual(len(team.agents), 2)
         alpha, beta = team.agents
         self.assertEqual(alpha.name, "alpha")
@@ -86,12 +102,66 @@ agents:
         self.assertEqual(team.termination.max_messages, 100)
         self.assertEqual(team.termination.token_budget, 200_000)
         self.assertEqual(team.termination.idle_timeout, 30.0)
-        self.assertEqual(team.termination.approval, ApprovalPolicy.UNANIMOUS)
-        self.assertEqual(len(team.agents), 1)
+        self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
+        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertIsNone(team.termination.approval.minimum_votes)
+        self.assertEqual(len(team.agents), 2)
         agent = team.agents[0]
         self.assertEqual(agent.name, "solo")
         self.assertIsNone(agent.model)
         self.assertEqual(agent.max_turns, 50)
+
+    def test_string_approval_is_backward_compatible_mode_shorthand(self) -> None:
+        # 구형: approval에 mode 문자열 하나만 지정 — timeout/minimum은 계약 기본값.
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval: participating_unanimous\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        approval = team.termination.approval
+        self.assertEqual(approval.mode, ApprovalPolicy.PARTICIPATING_UNANIMOUS)
+        self.assertEqual(approval.voting_timeout, 30.0)
+        self.assertIsNone(approval.minimum_votes)
+
+    def test_mapping_approval_loads_all_fields(self) -> None:
+        # 신형: mode/timeout_seconds/minimum_votes 전체 지정.
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: participating_unanimous\n"
+            "    timeout_seconds: 45\n"
+            "    minimum_votes: 2\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        approval = team.termination.approval
+        self.assertEqual(approval.mode, ApprovalPolicy.PARTICIPATING_UNANIMOUS)
+        self.assertEqual(approval.voting_timeout, 45)
+        self.assertEqual(approval.minimum_votes, 2)
+
+    def test_solo_team_with_first_mode_is_allowed(self) -> None:
+        # 1인 팀은 approval mode가 first일 때만 허용된다 (D-018).
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval: first\n"
+            + SOLO_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        self.assertEqual(len(team.agents), 1)
+        self.assertEqual(team.termination.approval.mode, ApprovalPolicy.FIRST)
 
 
 class DefaultTeamYamlTest(unittest.TestCase):
@@ -107,7 +177,9 @@ class DefaultTeamYamlTest(unittest.TestCase):
         self.assertEqual(len(team.agents), 3)
         agent_names = {agent.name for agent in team.agents}
         self.assertEqual(agent_names, {"researcher", "analyst", "writer"})
-        self.assertEqual(team.termination.approval, ApprovalPolicy.UNANIMOUS)
+        self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
+        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertIsNone(team.termination.approval.minimum_votes)
         self.assertEqual(team.termination.max_messages, 100)
         self.assertEqual(team.termination.token_budget, 200_000)
         self.assertEqual(team.termination.idle_timeout, 30.0)
@@ -208,7 +280,7 @@ agents:
             self.assertIn("role", str(ctx.exception))
             self.assertIn("agents[0]", str(ctx.exception))
 
-    def test_invalid_approval_value_lists_valid_options(self) -> None:
+    def test_invalid_approval_string_lists_valid_options(self) -> None:
         content = (
             "name: t\n"
             "termination:\n"
@@ -221,8 +293,131 @@ agents:
                 load_team_config(path)
             message = str(ctx.exception)
             self.assertIn("sometimes", message)
-            for valid in ("unanimous", "majority", "first"):
+            for valid in ("unanimous", "majority", "participating_unanimous", "first"):
                 self.assertIn(valid, message)
+
+    def test_invalid_approval_mapping_mode_lists_valid_options(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: sometimes\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn("sometimes", message)
+            for valid in ("unanimous", "majority", "participating_unanimous", "first"):
+                self.assertIn(valid, message)
+
+    def test_approval_mapping_unknown_key_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: unanimous\n"
+            "    bogus_key: 1\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn("bogus_key", message)
+            self.assertIn("approval", message)
+
+    def test_approval_mapping_missing_mode_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    timeout_seconds: 10\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn("mode", message)
+            self.assertIn("missing required key", message)
+
+    def test_approval_timeout_seconds_negative_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: unanimous\n"
+            "    timeout_seconds: -5\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn("timeout_seconds", str(ctx.exception))
+
+    def test_approval_timeout_seconds_string_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: unanimous\n"
+            '    timeout_seconds: "soon"\n'
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn("timeout_seconds", str(ctx.exception))
+
+    def test_approval_list_type_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval: [unanimous]\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn("approval", str(ctx.exception))
+
+    def test_minimum_votes_with_unanimous_wraps_contract_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval:\n"
+            "    mode: unanimous\n"
+            "    minimum_votes: 2\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn(str(path), str(ctx.exception))
+            self.assertIsInstance(ctx.exception.__cause__, ContractError)
+
+    def test_solo_team_with_unanimous_mode_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  approval: unanimous\n"
+            + SOLO_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn(str(path), str(ctx.exception))
+            self.assertIsInstance(ctx.exception.__cause__, ContractError)
 
     def test_max_messages_type_error_raises_config_error(self) -> None:
         content = (

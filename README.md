@@ -57,8 +57,11 @@ default_model: ...       # 선택 — 생략 시 계약 기본값(GPT-5.6 Terra)
 termination:             # 종료 정책 (전부 선택)
   max_messages: 100      # 세션 메시지 상한
   token_budget: 200000   # 세션 토큰 예산
-  idle_timeout: 30       # 전원 유휴 판정 시간(초)
-  approval: unanimous    # 정족수: unanimous | majority | participating_unanimous | first
+  idle_timeout: 30       # 전원 유휴 판정 시간(초) — running 전용
+  approval:              # 화백 합의 설정 (문자열 축약형 `approval: unanimous`도 지원)
+    mode: unanimous      # unanimous | majority | participating_unanimous | first
+    timeout_seconds: 30  # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
+    minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
 agents:                  # 1명 이상
   - name: researcher     # 필수
     role: ...            # 필수 — 대시보드 표시용
@@ -81,6 +84,7 @@ agents:                  # 1명 이상
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
+| M6 | 확장 실험 (외부 워커, 도구, 도트 월드 UI) | 후순위 |
 
 상세 계획은 [docs/Plan.md](docs/Plan.md) 참조.
 

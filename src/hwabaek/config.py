@@ -4,6 +4,12 @@
 변환한다. 스키마는 엄격하게 검증한다(오타 방어) — 허용되지 않은 키가
 있으면 즉시 실패하고, 필드 경로를 포함한 영어 ASCII 오류 메시지를 낸다.
 
+termination.approval 마이그레이션 (D-019): 구형은 `approval: <mode>` 처럼
+mode 문자열 하나만 쓰는 축약형이며 하위 호환으로 계속 지원한다. 신형은
+`approval: {mode, timeout_seconds, minimum_votes}` 매핑으로, voting 전용
+타이머(timeout_seconds → ApprovalConfig.voting_timeout)와 participating_unanimous
+전용 하한(minimum_votes)을 함께 지정할 수 있다.
+
 이 모듈은 파일 I/O(open)와 yaml.safe_load만 표준 의존성 위에 추가한다.
 """
 from __future__ import annotations
@@ -15,6 +21,7 @@ import yaml
 
 from hwabaek.contracts import (
     AgentSpec,
+    ApprovalConfig,
     ApprovalPolicy,
     ContractError,
     TeamConfig,
@@ -25,6 +32,7 @@ from hwabaek.contracts import (
 _TOP_LEVEL_KEYS = {"name", "description", "default_model", "termination", "agents"}
 _TERMINATION_KEYS = {"max_messages", "token_budget", "idle_timeout", "approval"}
 _AGENT_KEYS = {"name", "role", "system_prompt", "model", "max_turns"}
+_APPROVAL_KEYS = {"mode", "timeout_seconds", "minimum_votes"}
 
 
 class ConfigError(ValueError):
@@ -100,6 +108,102 @@ def _optional_number(
     return value
 
 
+def _invalid_approval_mode_error(
+    value: Any, *, file_path: Path, prefix: str
+) -> ConfigError:
+    """approval mode 값이 ApprovalPolicy에 없을 때의 오류. 4종 유효값을 모두 나열한다."""
+    valid = ", ".join(p.value for p in ApprovalPolicy)
+    return ConfigError(
+        f"team config {file_path}: {prefix}: invalid value {value!r}, "
+        f"expected one of: {valid}"
+    )
+
+
+def _parse_approval(
+    approval_raw: Any, *, file_path: Path, prefix: str, default: ApprovalConfig
+) -> ApprovalConfig:
+    """termination.approval을 파싱한다.
+
+    구형(문자열, mode 축약형)과 신형(매핑, mode/timeout_seconds/minimum_votes)을
+    모두 허용한다 (D-019 마이그레이션).
+    """
+    if approval_raw is None:
+        return default
+
+    if isinstance(approval_raw, str):
+        try:
+            mode = ApprovalPolicy(approval_raw)
+        except ValueError:
+            raise _invalid_approval_mode_error(
+                approval_raw, file_path=file_path, prefix=f"{prefix}.approval"
+            ) from None
+        try:
+            return ApprovalConfig(mode=mode)
+        except ContractError as e:
+            raise ConfigError(f"team config {file_path}: {prefix}.approval: {e}") from e
+
+    if isinstance(approval_raw, dict):
+        approval_prefix = f"{prefix}.approval"
+        _reject_unknown_keys(
+            approval_raw, _APPROVAL_KEYS, file_path=file_path, prefix=approval_prefix
+        )
+
+        mode_raw = approval_raw.get("mode")
+        if mode_raw is None:
+            raise ConfigError(
+                f"team config {file_path}: {approval_prefix}.mode: missing required key"
+            )
+        if not isinstance(mode_raw, str):
+            raise ConfigError(
+                f"team config {file_path}: {approval_prefix}.mode: expected a string, "
+                f"got {mode_raw!r}"
+            )
+        try:
+            mode = ApprovalPolicy(mode_raw)
+        except ValueError:
+            raise _invalid_approval_mode_error(
+                mode_raw, file_path=file_path, prefix=f"{approval_prefix}.mode"
+            ) from None
+
+        kwargs: dict[str, Any] = {"mode": mode}
+
+        if "timeout_seconds" in approval_raw:
+            timeout_raw = approval_raw["timeout_seconds"]
+            if (
+                isinstance(timeout_raw, bool)
+                or not isinstance(timeout_raw, (int, float))
+                or timeout_raw <= 0
+            ):
+                raise ConfigError(
+                    f"team config {file_path}: {approval_prefix}.timeout_seconds: "
+                    f"expected a positive number, got {timeout_raw!r}"
+                )
+            kwargs["voting_timeout"] = timeout_raw
+
+        if "minimum_votes" in approval_raw:
+            min_votes_raw = approval_raw["minimum_votes"]
+            if min_votes_raw is not None and (
+                isinstance(min_votes_raw, bool)
+                or not isinstance(min_votes_raw, int)
+                or min_votes_raw < 1
+            ):
+                raise ConfigError(
+                    f"team config {file_path}: {approval_prefix}.minimum_votes: "
+                    f"expected null or a positive int, got {min_votes_raw!r}"
+                )
+            kwargs["minimum_votes"] = min_votes_raw
+
+        try:
+            return ApprovalConfig(**kwargs)
+        except ContractError as e:
+            raise ConfigError(f"team config {file_path}: {approval_prefix}: {e}") from e
+
+    raise ConfigError(
+        f"team config {file_path}: {prefix}.approval: expected a string or mapping, "
+        f"got {approval_raw!r}"
+    )
+
+
 def _parse_termination(
     data: dict[str, Any] | None, *, file_path: Path
 ) -> TerminationPolicy:
@@ -126,24 +230,9 @@ def _parse_termination(
         data, "idle_timeout", file_path=file_path, prefix=prefix,
         default=defaults.idle_timeout,
     )
-
-    approval_raw = data.get("approval")
-    if approval_raw is None:
-        approval = defaults.approval
-    else:
-        if not isinstance(approval_raw, str):
-            raise ConfigError(
-                f"team config {file_path}: {prefix}.approval: expected a string, "
-                f"got {approval_raw!r}"
-            )
-        try:
-            approval = ApprovalPolicy(approval_raw)
-        except ValueError:
-            valid = ", ".join(p.value for p in ApprovalPolicy)
-            raise ConfigError(
-                f"team config {file_path}: {prefix}.approval: invalid value "
-                f"{approval_raw!r}, expected one of: {valid}"
-            ) from None
+    approval = _parse_approval(
+        data.get("approval"), file_path=file_path, prefix=prefix, default=defaults.approval
+    )
 
     try:
         return TerminationPolicy(

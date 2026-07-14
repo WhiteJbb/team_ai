@@ -2,6 +2,40 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 설계 동기화: 신규 설계를 문서·계약에 반영 (feat/m1-contracts, M1 PR에 포함)
+
+### 진행한 작업
+- 사용자 설계 고도화 지시에 따른 **설계 동기화** (M2 구현 없음, 문서·계약만).
+  현재 상태를 3범주(일치/충돌/미정의)로 분류 후 Gap 해소.
+- **결정 기록 (D-018~D-024)**: 투표 대상 스냅샷 불변(D-016 §5 번복 —
+  with_voter_removed 삭제, 0명 심의자는 no_quorum + 팀 검증 사전 거부) /
+  idle·voting 타이머 분리 + approval 구조형 설정(문자열 하위호환) /
+  ResultProposal.status·Vote 독립 계약·투표 변경 금지·reject 사유 필수 /
+  종료 직렬화·우선순위·interrupted / 이벤트 봉투(event_id·sequence) 채택 +
+  taxonomy는 후보로 M2 확정 / 메시지 sequence·자기송신 금지·중복 배달 무시 /
+  voting 중 일반 메시지 허용. D-017 갱신(store/ 분리, M2 이동, 테이블 확장).
+- **계약 동기화 (직접 작성)**: contracts.py — ProposalStatus·Vote·ApprovalConfig·
+  ALLOWED_COMMANDS·Message.sequence/자기송신 금지·Event 봉투 개편·
+  FailReason.INTERRUPTED·ErrorCategory. llm/base.py — LLMError.category +
+  LLMTimeoutError. decide()는 빈 voters → no_quorum(비-first)으로 반전,
+  participating_unanimous에 minimum_votes 지원.
+- **병렬 위임**: 계약 테스트 동기화(opus — test_contracts 191개 + test_llm_fake
+  23개), 구조형 approval 로더 + 기본 팀 YAML + 테스트 30개(sonnet),
+  EventContract/ReviewChecklist(9항목 추가)/Research(조사 항목 5건) 동기화(sonnet).
+- **계획 재정리 (Plan.md)**: 코어 의미론을 7개 항목으로 확장(메시지 정책, 이력 보존
+  우선순위, 타이머 2종, 스냅샷 합의, 종료 원자성, 재시작 처리), 모듈 경계
+  (SessionManager/ConsensusEngine 판정-전환 분리/store/base+sqlite), 마일스톤
+  M1~M6 재정리(M6 확장 실험 신설) + 비목표 명시.
+- 전체 테스트 **244개, 3회 반복 통과**.
+
+### 오류/이슈
+- 없음. (구 의미론 테스트들이 예상대로 실패 → 새 계약으로 동기화)
+
+### 보류/후순위 (의도적 — M2 이후)
+- Store Protocol 상세와 SQLite 구현, 도메인 이벤트 세분 taxonomy 확정(EventContract
+  §8 후보), 엔진 강제 사항 전부(voting 잠금 실행, 늦은 투표 무시, 종료 lock,
+  타이머 감시, 도구 호출 런타임 검증), 이력 절단 구현.
+
 ## 2026-07-14 — 합의 의미론 개정 + Hermes 미도입 확정 (feat/m1-contracts, M1 PR에 포함)
 
 ### 진행한 작업

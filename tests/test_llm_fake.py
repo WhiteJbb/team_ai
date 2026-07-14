@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from hwabaek.contracts import ContractError, Usage
+from hwabaek.contracts import ContractError, ErrorCategory, Usage
 from hwabaek.llm.base import (
     Blame,
     LLMAuthError,
@@ -20,6 +20,7 @@ from hwabaek.llm.base import (
     LLMRequest,
     LLMResponse,
     LLMServerError,
+    LLMTimeoutError,
     Role,
     StopReason,
     ToolCall,
@@ -67,15 +68,17 @@ class FakeLLMClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(fake.calls[1], req_b)
 
     async def test_error_instances_are_raised_with_contract_blame(self) -> None:
-        # 주입한 오류는 해당 타입 그대로 raise되고 blame/retryable이 계약과 일치해야 한다.
+        # 주입한 오류는 해당 타입 그대로 raise되고 blame/category/retryable이 계약과
+        # 일치해야 한다. 6종 오류 계층 전체(타임아웃 포함)를 검증한다.
         cases = [
-            (LLMBadRequestError, Blame.CLIENT, False),
-            (LLMAuthError, Blame.CLIENT, False),
-            (LLMRateLimitError, Blame.PROVIDER, True),
-            (LLMServerError, Blame.PROVIDER, True),
-            (LLMConnectionError, Blame.PROVIDER, True),
+            (LLMBadRequestError, Blame.CLIENT, ErrorCategory.CLIENT_ERROR, False),
+            (LLMAuthError, Blame.CLIENT, ErrorCategory.CLIENT_ERROR, False),
+            (LLMRateLimitError, Blame.PROVIDER, ErrorCategory.RATE_LIMIT, True),
+            (LLMServerError, Blame.PROVIDER, ErrorCategory.PROVIDER_ERROR, True),
+            (LLMTimeoutError, Blame.PROVIDER, ErrorCategory.TIMEOUT, True),
+            (LLMConnectionError, Blame.PROVIDER, ErrorCategory.PROVIDER_ERROR, True),
         ]
-        for error_cls, expected_blame, expected_retryable in cases:
+        for error_cls, expected_blame, expected_category, expected_retryable in cases:
             with self.subTest(error=error_cls.__name__):
                 injected = error_cls("boom")
                 fake = FakeLLMClient(script=[injected])
@@ -83,9 +86,10 @@ class FakeLLMClientTest(unittest.IsolatedAsyncioTestCase):
                     await fake.complete(make_request())
                 # 같은 인스턴스가 그대로 전파되어야 한다.
                 self.assertIs(ctx.exception, injected)
-                # 계약이 정한 귀책/재시도 속성.
+                # 계약이 정한 귀책/범주/재시도 속성.
                 self.assertIsInstance(ctx.exception, LLMError)
                 self.assertEqual(ctx.exception.blame, expected_blame)
+                self.assertEqual(ctx.exception.category, expected_category)
                 self.assertEqual(ctx.exception.retryable, expected_retryable)
                 # 실패한 호출도 기록되어야 한다.
                 self.assertEqual(len(fake.calls), 1)

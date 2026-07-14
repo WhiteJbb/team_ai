@@ -16,7 +16,7 @@ import enum
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from hwabaek.contracts import ContractError, Usage
+from hwabaek.contracts import ContractError, ErrorCategory, Usage
 
 
 class StopReason(str, enum.Enum):
@@ -159,9 +159,14 @@ class Blame(str, enum.Enum):
 
 
 class LLMError(Exception):
-    """LLM 호출 실패의 공통 부모. 어댑터가 SDK 예외를 이 계층으로 정규화한다."""
+    """LLM 호출 실패의 공통 부모. 어댑터가 SDK 예외를 이 계층으로 정규화한다.
+
+    category(세분 범주)와 retryable(재시도 가능 여부)은 분리해 기록한다 —
+    오류 기록·이벤트에는 category를 쓰고, blame은 집계용 상위 구분이다.
+    """
 
     blame: Blame = Blame.PROVIDER
+    category: ErrorCategory = ErrorCategory.PROVIDER_ERROR
     retryable: bool = False
 
 
@@ -169,6 +174,7 @@ class LLMBadRequestError(LLMError):
     """4xx 계열 — 요청 구성이 잘못됨 (파라미터/스키마 오류)."""
 
     blame = Blame.CLIENT
+    category = ErrorCategory.CLIENT_ERROR
     retryable = False
 
 
@@ -176,6 +182,7 @@ class LLMAuthError(LLMError):
     """인증/권한 실패 — 키 문제. 메시지에 키를 포함하지 않는다."""
 
     blame = Blame.CLIENT
+    category = ErrorCategory.CLIENT_ERROR
     retryable = False
 
 
@@ -183,6 +190,7 @@ class LLMRateLimitError(LLMError):
     """429 — 재시도 대상이지만 세션 health 판정에서 모델 탓으로 돌리지 않는다."""
 
     blame = Blame.PROVIDER
+    category = ErrorCategory.RATE_LIMIT
     retryable = True
 
 
@@ -190,13 +198,23 @@ class LLMServerError(LLMError):
     """5xx 계열."""
 
     blame = Blame.PROVIDER
+    category = ErrorCategory.PROVIDER_ERROR
+    retryable = True
+
+
+class LLMTimeoutError(LLMError):
+    """요청 시간 초과."""
+
+    blame = Blame.PROVIDER
+    category = ErrorCategory.TIMEOUT
     retryable = True
 
 
 class LLMConnectionError(LLMError):
-    """네트워크/타임아웃."""
+    """네트워크 연결 실패."""
 
     blame = Blame.PROVIDER
+    category = ErrorCategory.PROVIDER_ERROR
     retryable = True
 
 

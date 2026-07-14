@@ -63,13 +63,35 @@ TERMINAL_STATUSES = frozenset(
     {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
 )
 
+# 에이전트 도구(명령) 이름 — 상태별 허용 규칙의 키.
+COMMAND_SEND_MESSAGE = "send_message"
+COMMAND_SUBMIT_RESULT = "submit_result"
+COMMAND_VOTE_RESULT = "vote_result"
+
+# 상태별 허용 명령 (D-024). voting 중 일반 메시지는 허용 — 반려 사유 질의응답 등
+# 심의 논의가 화백 패턴의 핵심이며, 남용은 메시지/토큰 예산이 방어한다.
+# 종료 상태에서는 모든 명령을 거부한다(거부된 호출은 감사용 rejected event로 기록 가능).
+ALLOWED_COMMANDS: dict[SessionStatus, frozenset[str]] = {
+    SessionStatus.RUNNING: frozenset({COMMAND_SEND_MESSAGE, COMMAND_SUBMIT_RESULT}),
+    SessionStatus.VOTING: frozenset({COMMAND_SEND_MESSAGE, COMMAND_VOTE_RESULT}),
+    SessionStatus.COMPLETED: frozenset(),
+    SessionStatus.FAILED: frozenset(),
+    SessionStatus.CANCELLED: frozenset(),
+}
+
+
+def allowed_commands(status: SessionStatus) -> frozenset[str]:
+    """해당 세션 상태에서 에이전트가 호출할 수 있는 명령 집합."""
+    return ALLOWED_COMMANDS[status]
+
 
 class FailReason(str, enum.Enum):
     BUDGET = "budget"            # 토큰 예산 초과
     MESSAGES = "messages"        # 메시지 수 상한 초과
-    IDLE = "idle"                # 전원 유휴 — 결과물 없이 종료
+    IDLE = "idle"                # 전원 유휴 — 결과물 없이 종료 (running 상태 전용, D-019)
     AGENT_ERROR = "agent_error"  # 생존 에이전트 부족 (오류로 dead 처리 누적)
-    NO_QUORUM = "no_quorum"      # 합의 정족수 미달 (전원 기권 등)
+    NO_QUORUM = "no_quorum"      # 합의 정족수 미달 (voting timeout 포함)
+    INTERRUPTED = "interrupted"  # 서버 재시작 시 이전 running/voting 세션 처리 (D-021)
 
 
 class ApprovalPolicy(str, enum.Enum):
@@ -97,10 +119,33 @@ class AgentState(str, enum.Enum):
 
 
 class ProposalOutcome(str, enum.Enum):
+    """정족수 '판정' 결과 — ConsensusEngine이 반환하고 SessionManager가 전환을 수행."""
+
     PENDING = "pending"      # 투표 진행 중
     APPROVED = "approved"    # 확정 → 세션 completed
     REJECTED = "rejected"    # 반려 → 세션 running 복귀
-    NO_QUORUM = "no_quorum"  # 유효 투표 없음 → 세션 failed(no_quorum)
+    NO_QUORUM = "no_quorum"  # 정족수 미달 → 세션 failed(no_quorum)
+
+
+class ProposalStatus(str, enum.Enum):
+    """제안 레코드의 수명주기 상태 (판정 결과 ProposalOutcome과 구분, D-020)."""
+
+    PENDING = "pending"        # 심의 중 (세션당 활성 제안 최대 1개)
+    APPROVED = "approved"      # 승인 확정
+    REJECTED = "rejected"      # 반려됨 — 새 버전 제출 가능
+    SUPERSEDED = "superseded"  # 반려 후 새 버전으로 대체됨
+
+
+class ErrorCategory(str, enum.Enum):
+    """오류 기록 범주 (D-016 귀책 원칙의 세분화). 재시도 가능 여부와는 분리해 기록한다."""
+
+    CLIENT_ERROR = "client_error"          # 우리 요청/코드 잘못
+    PROVIDER_ERROR = "provider_error"      # 프로바이더 장애/혼잡
+    RATE_LIMIT = "rate_limit"              # 한도 초과 (프로바이더 귀책으로 집계하지 않음)
+    TIMEOUT = "timeout"                    # 시간 초과
+    INVALID_TOOL_CALL = "invalid_tool_call"  # LLM의 잘못된 도구 호출 (런타임 검증 실패)
+    RUNTIME_ERROR = "runtime_error"        # 화백 내부 오류
+    CANCELLED = "cancelled"                # 취소로 인한 중단
 
 
 class EventType(str, enum.Enum):
@@ -164,7 +209,12 @@ class Usage:
 
 @dataclass(frozen=True)
 class Message:
-    """버스에 실리는 단일 메시지. created_at은 버스가 ISO 8601(UTC)로 찍는다.
+    """버스에 실리는 단일 메시지. id/created_at/sequence는 버스가 부여한다.
+
+    sequence는 세션 단위 단조 증가 정수(D-023) — 동일 timestamp의 순서 고정과
+    결정적 테스트의 기준. 브로드캐스트는 원본 1건이 수신자별 인박스에 배달되며
+    (발신자 제외), 별도 배달 id는 두지 않는다. 버스는 동일 id의 중복 배달을
+    무시한다. 자기 자신을 수신자로 지정할 수 없다.
 
     타입별 규칙 (Plan "코어 의미론" §5, D-016):
     - CHAT: vote/proposal_id 금지. 수신자는 특정 에이전트(들) 또는 브로드캐스트.
@@ -182,6 +232,7 @@ class Message:
     type: MessageType
     content: str
     created_at: str
+    sequence: int
     vote: VoteDecision | None = None
     proposal_id: str | None = None
 
@@ -189,12 +240,17 @@ class Message:
         for name in ("id", "session_id", "sender", "created_at"):
             if not getattr(self, name):
                 raise ContractError(f"Message.{name} must be non-empty")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) \
+                or self.sequence < 0:
+            raise ContractError("Message.sequence must be a non-negative int")
         if not isinstance(self.recipients, tuple) or not self.recipients:
             raise ContractError("Message.recipients must be a non-empty tuple")
         if BROADCAST in self.recipients and self.recipients != (BROADCAST,):
             raise ContractError("broadcast recipient '*' must be used alone")
         if self.sender == BROADCAST:
             raise ContractError("Message.sender must not be the broadcast marker")
+        if self.sender in self.recipients:
+            raise ContractError("agent cannot address a message to itself")
         if self.type is MessageType.CHAT:
             if not self.content:
                 raise ContractError("chat message content must be non-empty")
@@ -272,13 +328,48 @@ class AgentSpec:
 
 
 @dataclass(frozen=True)
+class ApprovalConfig:
+    """합의 승인 설정 (D-016, D-019) — 팀 YAML의 termination.approval에 대응.
+
+    voting_timeout은 voting 상태 전용 타이머다 — running의 idle_timeout과 분리
+    (D-019). 만료 시 미투표는 기권 처리되며 어떤 모드에서도 승인으로 간주하지
+    않는다. minimum_votes는 participating_unanimous 전용 유효 투표 하한.
+    """
+
+    mode: ApprovalPolicy = ApprovalPolicy.UNANIMOUS
+    voting_timeout: float = 30.0
+    minimum_votes: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.voting_timeout, bool)
+            or not isinstance(self.voting_timeout, (int, float))
+            or self.voting_timeout <= 0
+        ):
+            raise ContractError("approval.voting_timeout must be a positive number")
+        if self.minimum_votes is not None:
+            if isinstance(self.minimum_votes, bool) \
+                    or not isinstance(self.minimum_votes, int) or self.minimum_votes < 1:
+                raise ContractError("approval.minimum_votes must be a positive int or null")
+            if self.mode is not ApprovalPolicy.PARTICIPATING_UNANIMOUS:
+                raise ContractError(
+                    "approval.minimum_votes is only valid with mode participating_unanimous"
+                )
+
+
+@dataclass(frozen=True)
 class TerminationPolicy:
-    """종료 정책 — 자율 협업의 수렴 안전장치 (Plan 종료 제어 + D-011)."""
+    """종료 정책 — 자율 협업의 수렴 안전장치 (Plan 종료 제어 + D-011/D-019).
+
+    idle_timeout은 running 상태 전용(전원 유휴 감지)이며, voting 대기 시간은
+    approval.voting_timeout이 별도로 관리한다 — voting 중 idle 감시는 세션을
+    failed(idle)로 종료하지 않는다.
+    """
 
     max_messages: int = 100
     token_budget: int = 200_000
     idle_timeout: float = 30.0
-    approval: ApprovalPolicy = ApprovalPolicy.UNANIMOUS
+    approval: ApprovalConfig = field(default_factory=ApprovalConfig)
 
     def __post_init__(self) -> None:
         for name in ("max_messages", "token_budget"):
@@ -317,6 +408,14 @@ class TeamConfig:
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ContractError(f"duplicate agent names in team: {', '.join(duplicates)}")
+        # 사전 거부 (D-018): 제출자는 자기 제안에 투표할 수 없으므로, 투표가 있는
+        # 모드에서 1인 팀은 심의자가 0명이라 어떤 제안도 확정될 수 없다.
+        if self.termination.approval.mode is not ApprovalPolicy.FIRST \
+                and len(self.agents) < 2:
+            raise ContractError(
+                f"approval mode {self.termination.approval.mode.value!r} requires at "
+                "least 2 agents (the proposer cannot vote on its own proposal)"
+            )
 
     def model_for(self, agent_name: str) -> str:
         """에이전트의 실효 모델 — 개별 지정이 없으면 팀 기본값."""
@@ -330,14 +429,23 @@ class TeamConfig:
 # 화백 합의 — 결과 제안과 투표 집계 (순수 함수, 세션 엔진이 재사용)
 # ---------------------------------------------------------------------------
 
+_ALLOWED_PROPOSAL_TRANSITIONS: dict[ProposalStatus, frozenset[ProposalStatus]] = {
+    ProposalStatus.PENDING: frozenset({ProposalStatus.APPROVED, ProposalStatus.REJECTED}),
+    ProposalStatus.REJECTED: frozenset({ProposalStatus.SUPERSEDED}),
+    ProposalStatus.APPROVED: frozenset(),
+    ProposalStatus.SUPERSEDED: frozenset(),
+}
+
+
 @dataclass(frozen=True)
 class ResultProposal:
-    """결과 제안 1건의 도메인 레코드 (D-016).
+    """결과 제안 1건의 도메인 레코드 (D-016, D-020).
 
-    반려 후 재제출은 version을 올린 새 제안으로 표현한다 — 투표는 반드시
-    proposal_id로 대상 제안을 가리키며, 이전 제안에 대한 늦은 투표는 현재
-    제안에 반영하지 않는다(엔진 규칙). running 상태에서만 새 제안을 만들 수
-    있고, voting 중 추가 제안은 도메인 오류다(엔진이 강제).
+    반려 후 재제출은 version을 올린 새 제안으로 표현하며, 반려된 이전 제안은
+    새 버전 제출 시 SUPERSEDED로 전환한다. 투표는 반드시 proposal_id로 대상
+    제안을 가리키며, 이전 제안에 대한 늦은 투표는 현재 제안에 반영하지 않는다
+    (엔진 규칙). 세션당 활성(PENDING) 제안은 최대 1개 — running에서만 새 제안을
+    만들 수 있고, voting 중 추가 제안은 도메인 오류다(엔진이 강제).
     """
 
     id: str
@@ -346,6 +454,7 @@ class ResultProposal:
     version: int
     content: str
     created_at: str
+    status: ProposalStatus = ProposalStatus.PENDING
 
     def __post_init__(self) -> None:
         for name in ("id", "session_id", "proposer", "content", "created_at"):
@@ -355,21 +464,72 @@ class ResultProposal:
                 or self.version < 1:
             raise ContractError("ResultProposal.version must be a positive int")
 
+    def with_status(self, new_status: ProposalStatus) -> "ResultProposal":
+        """제안 상태 전이 — PENDING→APPROVED/REJECTED, REJECTED→SUPERSEDED만 허용."""
+        if new_status not in _ALLOWED_PROPOSAL_TRANSITIONS[self.status]:
+            raise InvalidTransition(
+                f"proposal cannot transition from {self.status.value} to {new_status.value}"
+            )
+        return replace(self, status=new_status)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["status"] = self.status.value
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ResultProposal":
-        return cls(**data)
+        payload = dict(data)
+        payload["status"] = ProposalStatus(payload["status"])
+        return cls(**payload)
+
+
+@dataclass(frozen=True)
+class Vote:
+    """투표 1건의 도메인 레코드 (D-020) — 영속화(votes 테이블)와 의결 기록의 단위.
+
+    규칙: 한 에이전트는 동일 제안에 한 번만 유효 투표(변경 금지 — VoteTally가
+    강제), 제출자는 자기 제안에 투표하지 않는다(엔진이 강제). REJECT에는 제출자가
+    보완할 수 있도록 사유(reason)가 필수다.
+    """
+
+    id: str
+    session_id: str
+    proposal_id: str
+    voter: str
+    decision: VoteDecision
+    created_at: str
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("id", "session_id", "proposal_id", "voter", "created_at"):
+            if not getattr(self, name):
+                raise ContractError(f"Vote.{name} must be non-empty")
+        if self.decision is VoteDecision.REJECT and not self.reason:
+            raise ContractError("reject vote requires a reason")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["decision"] = self.decision.value
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Vote":
+        payload = dict(data)
+        payload["decision"] = VoteDecision(payload["decision"])
+        return cls(**payload)
 
 
 @dataclass(frozen=True)
 class VoteTally:
-    """제안 1건에 대한 투표 현황. voters는 제안 생성 시점의 '생존' 심의 대상
-    (제출자 제외) 전원이며, 심의 중 사망한 에이전트는 with_voter_removed로
-    제외해 정족수를 재계산한다 (D-016).
+    """제안 1건에 대한 투표 현황.
 
-    기권(abstained)은 투표 시간 만료까지의 무투표를 엔진이 기권 처리한 것 —
+    voters는 **voting 시작 시점의 생존 심의 대상(제출자 제외) 스냅샷**이며,
+    심의 도중 에이전트가 사망해도 집합을 변경하지 않는다 (D-018 — 불변 스냅샷).
+    사망·오류로 투표가 불가능해진 심의자는 voting_timeout 만료 시 기권 처리되어
+    unanimous에서는 no_quorum으로 이어진다.
+
+    기권(abstained)은 voting_timeout 만료까지의 무투표를 엔진이 기권 처리한 것 —
     어떤 정책에서도 기권을 암묵적 승인으로 간주하지 않는다.
     """
 
@@ -405,49 +565,39 @@ class VoteTally:
         responded = self.approvals | self.rejections | self.abstained
         return replace(self, abstained=self.abstained | (agents & self.voters - responded))
 
-    def with_voter_removed(self, agent: str) -> "VoteTally":
-        """심의 중 사망한 에이전트를 심의 대상에서 제외한다 — 정족수 재계산 (D-016).
-
-        모든 응답 그룹에서도 함께 제거한다(사망자의 기존 투표는 무효).
-        """
-        if agent not in self.voters:
-            raise ContractError(f"agent {agent!r} is not a voter for this proposal")
-        removed = frozenset({agent})
-        return VoteTally(
-            voters=self.voters - removed,
-            approvals=self.approvals - removed,
-            rejections=self.rejections - removed,
-            abstained=self.abstained - removed,
-        )
-
     @property
     def pending(self) -> frozenset[str]:
         return self.voters - self.approvals - self.rejections - self.abstained
 
-    def decide(self, policy: ApprovalPolicy) -> ProposalOutcome:
-        """정족수 판정 (D-016). 결과가 이미 확정 가능하면 PENDING을 기다리지 않는다.
+    def decide(self, approval: ApprovalConfig) -> ProposalOutcome:
+        """정족수 판정 (D-016/D-018). 결과가 이미 확정 가능하면 PENDING을 기다리지 않는다.
 
         공통 규칙:
         - FIRST: 심의 생략, 즉시 확정.
-        - voters가 비면(1인 팀 / 심의자 전원 사망) 심의자가 없으므로 즉시 확정.
+        - voters가 빈 집합이면(FIRST 제외) 확정 불가 → NO_QUORUM (D-018 —
+          팀 검증이 사전 차단하지만 계약 차원에서도 방어).
         - 기권은 어떤 정책에서도 암묵적 승인이 아니다.
 
         정책별 규칙:
-        - UNANIMOUS: 반대 1표면 즉시 반려. 생존 심의자 '전원' approve여야 확정 —
-          기권(만료 미투표)이 하나라도 있으면 확정 불가 → 전원 응답 시 NO_QUORUM.
-        - MAJORITY: 생존 심의자 '전체'의 과반 approve로 확정(조기 확정 가능).
+        - UNANIMOUS: 반대 1표면 즉시 반려. 스냅샷 심의자 '전원' approve여야 확정 —
+          기권(만료 미투표·사망)이 하나라도 있으면 확정 불가 → 전원 응답 시 NO_QUORUM.
+        - MAJORITY: 스냅샷 심의자 '전체'의 과반 approve로 확정(조기 확정 가능).
           남은 미응답을 전부 approve로 가정해도 과반이 불가능해지면 조기 종료 —
           반대표가 있으면 REJECTED, 기권만으로 불가능해졌으면 NO_QUORUM.
         - PARTICIPATING_UNANIMOUS: 반대 1표면 즉시 반려. 전원 응답 후 유효 투표
-          (approve/reject)를 한 전원이 approve면 확정, 유효 투표가 없으면 NO_QUORUM.
+          (approve/reject)를 한 전원이 approve면서 그 수가 minimum_votes(기본 1)
+          이상이면 확정, 아니면 NO_QUORUM.
         """
-        if policy is ApprovalPolicy.FIRST or not self.voters:
+        mode = approval.mode
+        if mode is ApprovalPolicy.FIRST:
             return ProposalOutcome.APPROVED
+        if not self.voters:
+            return ProposalOutcome.NO_QUORUM
 
         n = len(self.voters)
         all_responded = not self.pending
 
-        if policy is ApprovalPolicy.UNANIMOUS:
+        if mode is ApprovalPolicy.UNANIMOUS:
             if self.rejections:
                 return ProposalOutcome.REJECTED
             if self.approvals == self.voters:
@@ -457,7 +607,7 @@ class VoteTally:
                 return ProposalOutcome.NO_QUORUM
             return ProposalOutcome.PENDING
 
-        if policy is ApprovalPolicy.MAJORITY:
+        if mode is ApprovalPolicy.MAJORITY:
             if len(self.approvals) * 2 > n:
                 return ProposalOutcome.APPROVED
             # 남은 미응답이 전부 approve해도 과반 불가 → 조기 종료.
@@ -472,8 +622,9 @@ class VoteTally:
         if self.rejections:
             return ProposalOutcome.REJECTED
         if all_responded:
+            required = approval.minimum_votes or 1
             return (
-                ProposalOutcome.APPROVED if self.approvals
+                ProposalOutcome.APPROVED if len(self.approvals) >= required
                 else ProposalOutcome.NO_QUORUM
             )
         return ProposalOutcome.PENDING
@@ -504,6 +655,13 @@ _ALLOWED_TRANSITIONS: dict[SessionStatus, frozenset[SessionStatus]] = {
 @dataclass(frozen=True)
 class Session:
     """태스크 1건의 수명주기. 상태 전이는 with_status()로만 수행한다.
+
+    종료 원자성 (D-021): 여러 종료 조건이 동시에 발생해도 종료는 한 번만
+    확정된다 — SessionManager가 세션 단위 lock으로 전환을 직렬화하고, 최초로
+    확정된 유효 종료 사유만 저장한다. 경합 시 우선순위는
+    cancelled → completed → budget/messages → agent_error → no_quorum → idle.
+    종료 후 도착한 이벤트는 상태를 바꾸지 못하며 감사용 rejected event로
+    기록할 수 있다. 이 계약의 종료 상태 전이 금지 표가 최종 방어선이다.
 
     불변식:
     - FAILED이면 fail_reason 필수, 그 외 상태에서는 금지.
@@ -614,39 +772,51 @@ class Session:
 
 @dataclass(frozen=True)
 class Event:
-    """세션 이벤트 스트림의 단위. seq는 세션 내 단조 증가 — SSE 재구독 복원 기준.
+    """세션 이벤트 스트림의 단위 (D-022).
 
-    payload 스키마는 type별로 아래 make_*_event 헬퍼가 고정한다.
+    sequence는 세션 내 0부터 단조 증가 — SSE `Last-Event-ID` 재구독 복원의 기준.
+    event_id는 전역 유일 식별자(엔진이 부여). payload 스키마는 type별로 아래
+    make_*_event 헬퍼가 고정한다. 내부 도메인 이벤트 세분 taxonomy(session.*,
+    agent.*, proposal.*, vote.*, ...)는 M2 발행 지점 구현과 함께 확정하며,
+    이 봉투와 호환되게 설계한다 — docs/EventContract.md 참조.
     """
 
-    seq: int
+    event_id: str
     session_id: str
     type: EventType
-    at: str
+    sequence: int
+    created_at: str
     payload: dict[str, Any]
 
     def __post_init__(self) -> None:
-        if isinstance(self.seq, bool) or not isinstance(self.seq, int) or self.seq < 0:
-            raise ContractError("Event.seq must be a non-negative int")
-        if not self.session_id or not self.at:
-            raise ContractError("Event.session_id and Event.at must be non-empty")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) \
+                or self.sequence < 0:
+            raise ContractError("Event.sequence must be a non-negative int")
+        if not self.event_id or not self.session_id or not self.created_at:
+            raise ContractError(
+                "Event.event_id, Event.session_id and Event.created_at must be non-empty"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "seq": self.seq,
+            "event_id": self.event_id,
             "session_id": self.session_id,
             "type": self.type.value,
-            "at": self.at,
+            "sequence": self.sequence,
+            "created_at": self.created_at,
             "payload": self.payload,
         }
 
 
-def make_session_status_event(seq: int, session: Session, at: str) -> Event:
+def make_session_status_event(
+    event_id: str, sequence: int, session: Session, created_at: str
+) -> Event:
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=session.id,
         type=EventType.SESSION_STATUS,
-        at=at,
+        sequence=sequence,
+        created_at=created_at,
         payload={
             "status": session.status.value,
             "fail_reason": session.fail_reason.value if session.fail_reason else None,
@@ -655,41 +825,45 @@ def make_session_status_event(seq: int, session: Session, at: str) -> Event:
     )
 
 
-def make_message_event(seq: int, message: Message) -> Event:
+def make_message_event(event_id: str, sequence: int, message: Message) -> Event:
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=message.session_id,
         type=EventType.MESSAGE,
-        at=message.created_at,
+        sequence=sequence,
+        created_at=message.created_at,
         payload=message.to_dict(),
     )
 
 
 def make_agent_state_event(
-    seq: int,
+    event_id: str,
+    sequence: int,
     session_id: str,
     agent: str,
     state: AgentState,
-    at: str,
+    created_at: str,
     detail: str | None = None,
 ) -> Event:
-    """detail에는 상태 변화의 사유를 담는다 — 특히 DEAD 전이 시 귀책을 포함한
-    실패 상세(영어 ASCII)를 남긴다 (오류 귀책 원칙)."""
+    """detail에는 상태 변화의 사유를 담는다 — 특히 DEAD 전이 시 귀책 범주
+    (ErrorCategory)를 포함한 실패 상세(영어 ASCII)를 남긴다 (오류 귀책 원칙)."""
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=session_id,
         type=EventType.AGENT_STATE,
-        at=at,
+        sequence=sequence,
+        created_at=created_at,
         payload={"agent": agent, "state": state.value, "detail": detail},
     )
 
 
 def make_usage_event(
-    seq: int,
+    event_id: str,
+    sequence: int,
     session_id: str,
     usage: Usage,
     token_budget: int,
-    at: str,
+    created_at: str,
     per_agent: dict[str, Usage] | None = None,
 ) -> Event:
     """usage는 세션 누적치, per_agent는 에이전트별 누적치 전체 맵.
@@ -698,10 +872,11 @@ def make_usage_event(
     유지할 필요 없이 마지막 이벤트만으로 복원 가능 (IA SC-03 에이전트 패널).
     """
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=session_id,
         type=EventType.USAGE,
-        at=at,
+        sequence=sequence,
+        created_at=created_at,
         payload={
             "usage": usage.to_dict(),
             "token_budget": token_budget,
@@ -714,15 +889,23 @@ def make_usage_event(
 
 
 def make_vote_status_event(
-    seq: int, session_id: str, proposal_id: str, tally: VoteTally, at: str
+    event_id: str,
+    sequence: int,
+    session_id: str,
+    proposal: ResultProposal,
+    tally: VoteTally,
+    created_at: str,
 ) -> Event:
+    """투표 현황 스냅샷 — 제안 version을 함께 실어 대시보드가 '제안 N차'를 표시."""
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=session_id,
         type=EventType.VOTE_STATUS,
-        at=at,
+        sequence=sequence,
+        created_at=created_at,
         payload={
-            "proposal_id": proposal_id,
+            "proposal_id": proposal.id,
+            "proposal_version": proposal.version,
             "approvals": sorted(tally.approvals),
             "rejections": sorted(tally.rejections),
             "abstained": sorted(tally.abstained),
@@ -731,13 +914,16 @@ def make_vote_status_event(
     )
 
 
-def make_result_event(seq: int, session: Session, at: str) -> Event:
+def make_result_event(
+    event_id: str, sequence: int, session: Session, created_at: str
+) -> Event:
     if session.status is not SessionStatus.COMPLETED:
         raise ContractError("result event requires a completed session")
     return Event(
-        seq=seq,
+        event_id=event_id,
         session_id=session.id,
         type=EventType.RESULT,
-        at=at,
+        sequence=sequence,
+        created_at=created_at,
         payload={"result": session.result, "submitted_by": session.submitted_by},
     )
