@@ -335,16 +335,16 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[budget phase: voting]", analyst_inputs)
 
         # voting 중 채팅의 tool result에는 명시적인 거부 사유가 붙는다.
-        tool_outputs = "\n".join(
-            result.content
+        corrective_context = "\n".join(
+            turn.content
+            or "\n".join(result.content for result in turn.tool_results)
             for req in fakes["analyst"].calls
             for turn in req.turns
-            for result in turn.tool_results
         )
         self.assertTrue(
-            "was not offered for this call" in tool_outputs
-            or "voting phase only allows vote_result" in tool_outputs,
-            tool_outputs,
+            "was not offered for this call" in corrective_context
+            or "voting phase only allows vote_result" in corrective_context,
+            corrective_context,
         )
 
     async def test_voting_call_injects_missing_proposal_body(self) -> None:
@@ -356,6 +356,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             seen_requests.append(request)
             return _vote("approve")
 
+        task = "ORIGINAL TASK: choose a safe delivery plan"
+        old_discussion = "OLD DISCUSSION MARKER: repeat this concern forever"
         manager, _, _ = self._build(
             [
                 ("writer", [_text()]),
@@ -363,10 +365,10 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             ],
             idle_timeout=1.0,
             voting_timeout=1.0,
+            task=task,
         )
+        manager.send_message("writer", ["reviewer"], old_discussion)
         manager.submit_result("writer", body)
-        # 실 결함의 핵심인 "voting이지만 inbox 본문 없음"을 직접 만든다.
-        manager._bus.drain("reviewer")
 
         session = await self._run(manager)
 
@@ -376,6 +378,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(body, merged)
         self.assertEqual(merged.count(body), 1)
+        self.assertIn(task, merged)
+        self.assertNotIn(old_discussion, merged)
         self.assertIn("[result proposal from writer]", merged)
         self.assertIn("[budget phase: voting]", merged)
 
@@ -416,13 +420,13 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.status, SessionStatus.COMPLETED)
         self.assertEqual(len(collector.messages(MessageType.VOTE)), 1)
-        tool_outputs = "\n".join(
-            result.content
+        corrective_context = "\n".join(
+            turn.content
+            or "\n".join(result.content for result in turn.tool_results)
             for req in fakes["reviewer"].calls
             for turn in req.turns
-            for result in turn.tool_results
         )
-        self.assertIn("this call started before voting", tool_outputs)
+        self.assertIn("this call started before voting", corrective_context)
         merged = "\n".join(
             turn.content for turn in voting_requests[0].turns if turn.content
         )
@@ -449,16 +453,16 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         session = await self._run(manager)
         self.assertEqual(session.status, SessionStatus.COMPLETED)
 
-        tool_outputs = "\n".join(
-            result.content
+        corrective_context = "\n".join(
+            turn.content
+            or "\n".join(result.content for result in turn.tool_results)
             for req in fakes["analyst"].calls
             for turn in req.turns
-            for result in turn.tool_results
         )
         # 교정 메시지: 무시 사실 + 활성 제안 id + 재시도 방법.
-        self.assertIn("made-up-id", tool_outputs)
-        self.assertIn("ACTIVE proposal", tool_outputs)
-        self.assertIn("omit proposal_id", tool_outputs)
+        self.assertIn("made-up-id", corrective_context)
+        self.assertIn("ACTIVE proposal", corrective_context)
+        self.assertIn("omit proposal_id", corrective_context)
         # 두 번째(정상) 투표는 메시지로 기록된다.
         self.assertEqual(len(coll.messages(MessageType.VOTE)), 2)
 
@@ -489,20 +493,29 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_running_chat_has_no_vote_reminder(self) -> None:
-        """running 중(활성 제안 없음) 채팅에는 리마인더가 붙지 않는다."""
+        """성공 채팅은 대기하고 동료 답신이 온 뒤에만 제출 호출을 재개한다."""
         manager, _, fakes = self._build(
             [
                 ("writer", [
                     _chat("gathering input", recipients=["analyst"]),
                     _submit("the deliverable"),
                 ]),
-                ("analyst", [_text(), _text("ack"), _vote("approve")]),
+                ("analyst", [
+                    _text(),
+                    _chat("ack", recipients=["writer"]),
+                    _vote("approve"),
+                ]),
             ],
             idle_timeout=1.0,
             voting_timeout=1.0,
         )
         session = await self._run(manager)
         self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(len(fakes["writer"].calls), 2)
+        resumed_input = "\n".join(
+            turn.content for turn in fakes["writer"].calls[1].turns if turn.content
+        )
+        self.assertIn("ack", resumed_input)
 
         tool_outputs = "\n".join(
             result.content

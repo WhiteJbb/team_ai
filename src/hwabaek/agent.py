@@ -246,6 +246,8 @@ class AgentLoop:
         self._calls_made = 0
         self._dead = False
         self._completion_task: asyncio.Task[LLMResponse] | None = None
+        self._voting_feedback_proposal_id: str | None = None
+        self._voting_feedback: str | None = None
 
     def cancel_current_call(self) -> bool:
         """진행 중인 LLM 호출만 취소하고 에이전트 루프는 다음 입력을 기다리게 한다."""
@@ -325,18 +327,37 @@ class AgentLoop:
             self._turns = truncate_history(self._turns, self._history_limit)
             instruction_for = getattr(self._hooks, "instruction_for", None)
             instruction = instruction_for(self.name) if instruction_for else None
-            request_turns = tuple(self._turns)
             proposal_for = getattr(self._hooks, "proposal_for", None)
             proposal = proposal_for(self.name) if proposal_for else None
             if proposal is not None:
-                marker = f"(proposal_id: {proposal.id})"
-                if not any(marker in turn.content for turn in self._turns):
-                    request_turns += (Turn(
+                if self._voting_feedback_proposal_id not in (None, proposal.id):
+                    self._voting_feedback_proposal_id = None
+                    self._voting_feedback = None
+                elif self._voting_feedback is not None:
+                    # discussion 호출이 voting 전환 뒤 늦게 끝나 거부된 경우에는
+                    # 다음 before_call에서 처음 알게 된 활성 제안에 귀속한다.
+                    self._voting_feedback_proposal_id = proposal.id
+                # 투표 판단에는 원래 작업과 현재 제안만 필요하다. 토론 전체와
+                # tool-use 쌍을 다시 보내지 않아 입력 토큰이 대화 길이에 비례해
+                # 증가하는 것을 막는다. 교정 호출에는 아래의 평문 피드백만 더한다.
+                request_turns = (
+                    self._turns[0],
+                    Turn(
                         role=Role.USER,
                         content=_render_result_proposal(
                             proposal.proposer, proposal.id, proposal.content
                         ),
+                    ),
+                )
+                if self._voting_feedback is not None:
+                    request_turns += (Turn(
+                        role=Role.USER,
+                        content=self._voting_feedback,
                     ),)
+            else:
+                self._voting_feedback_proposal_id = None
+                self._voting_feedback = None
+                request_turns = tuple(self._turns)
             if instruction:
                 request_turns += (Turn(role=Role.USER, content=instruction),)
             tools_for = getattr(self._hooks, "tools_for", None)
@@ -434,6 +455,23 @@ class AgentLoop:
             results = tuple(results_list)
             # 병렬 tool_use여도 모든 결과를 하나의 user 턴으로 반환한다.
             self._turns.append(Turn(role=Role.USER, tool_results=results))
+            retry_instruction = getattr(self._hooks, "retry_instruction", None)
+            retry = retry_instruction(self.name) if retry_instruction else None
+            if not any(result.is_error for result in results) and not retry:
+                # 성공한 일반 메시지가 자기 추론 체인을 다시 깨우지 않게 한다.
+                # 도착해 있던 메시지는 다음 outer wait가 즉시 소비하므로 유실되지
+                # 않으며, 제출·투표 성공도 같은 방식으로 자연스럽게 대기한다.
+                return
+            labels = (
+                f"{'error' if result.is_error else 'result'}: {result.content}"
+                for result in results
+            )
+            self._voting_feedback_proposal_id = (
+                proposal.id if proposal is not None else None
+            )
+            self._voting_feedback = "[previous tool feedback]\n" + "\n".join(labels)
+            if retry:
+                self._turns.append(Turn(role=Role.USER, content=retry))
 
     def _execute_tool(
         self, call: ToolCall, offered_tools: frozenset[str]
