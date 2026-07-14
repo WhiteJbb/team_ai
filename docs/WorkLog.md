@@ -2,6 +2,30 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 설계 갭 검토 및 코어 의미론 확정 (M1 준비)
+
+### 진행한 작업
+- 전체 설계 문서 검토로 M1 착수 전 설계 갭 식별: 인박스 소비 정책, 대화 이력 표현,
+  세션 상태 기계(idle의 성공/실패 분류 모호), submit_result 경합, idle 판정 레이스,
+  대시보드 접근 범위, 동시 세션 정책.
+- 사용자 정책 결정 3건: **화백 합의 모드**(D-011 — submit_result 후 투표 승인,
+  기본 만장일치), **localhost 전용**(D-012 — P-02 LAN 시나리오는 확장으로 이연),
+  **동시 세션 1개**(D-013).
+- 기술 설계 4건을 Plan.md "코어 의미론" 절로 확정: 인박스 배치 소비(메시지 1건당
+  1호출 금지), 발신자 태깅 user 턴 병합 + 이력 상한 절단, 세션 상태 기계
+  (voting 상태·fail_reason enum·agent_error 시 dead 처리), 단일 감시 태스크 idle 판정.
+- 문서 정합화: Plan(M1 계약에 vote/approval/fail_reason 반영, M2 실패 경로 테스트에
+  합의 경로 추가), IA(SC-01 제출 비활성, SC-03 투표 표시), UserScenarios(US-01 갱신,
+  US-06 반려/재제출 추가), README, ProjectContext.
+
+### 오류/이슈
+- 없음 (문서 작업만 수행).
+
+### 다음 할 일
+- M1(계약 확정) 착수: `feat/m1-contracts` 브랜치 — contracts.py + llm/base.py +
+  팀 YAML 스키마 + SSE 이벤트 계약
+- M2 착수 전 스파이크: ChatGPT subscription(OAuth) 연동 검증, GPT-5.6 모델 ID 확인
+
 ## 2026-07-14 — 패키지 이름·기본 모델 결정 (M0 후속)
 
 ### 진행한 작업

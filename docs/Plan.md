@@ -22,10 +22,43 @@
   기본 모델은 GPT-5.6 Terra(D-008), LLM 클라이언트는 프로바이더 중립 계약(D-009).
   `send_message`(다른 에이전트 또는 브로드캐스트), `submit_result`(최종 결과 제출) 도구를 가진다.
 - **종료 제어** (자율 협업 패턴의 핵심 안전장치):
-  1. 어느 에이전트든 `submit_result` 호출 → 세션 정상 종료
-  2. 세션 총 메시지 수 상한 초과 → 강제 종료 (failed: budget)
+  1. 어느 에이전트든 `submit_result` 호출 → 화백 합의 투표(D-011) → 승인 시 정상 종료
+  2. 세션 총 메시지 수 상한 초과 → 강제 종료 (failed: messages)
   3. 세션 토큰 예산 초과 → 강제 종료 (failed: budget)
-  4. 모든 에이전트 유휴(보낼 메시지 없음) → 종료 (idle)
+  4. 모든 에이전트 유휴(보낼 메시지 없음) → 종료 (failed: idle)
+- **동시 세션 1개** (D-013): running/voting 세션 존재 시 새 제출 거부 + 안내.
+
+## 코어 의미론 (M1 계약에 반영)
+
+1. **인박스 배치 소비**: 에이전트는 LLM 호출 중 도착한 메시지를 인박스에 쌓고,
+   호출이 끝나면 쌓인 메시지 **전부를 하나의 user 턴으로 병합해 1회 호출**한다.
+   메시지 1건당 1호출 금지 — 비용·수렴 모두 불리.
+2. **대화 이력 표현**: 수신 메시지는 발신자를 태깅한 user 턴으로 병합
+   (예: `[from: analyst] ...`). 시스템 프롬프트는 고정(캐시 prefix), 이력은 뒤에만
+   append — 프롬프트 캐싱 전략(Research §2·§6)과 정합. 이력 상한(에이전트당 메시지 수)
+   도달 시 앞부분을 절단하고 절단 사실을 이력에 명시(M5 compaction 전 최소 방어선).
+3. **세션 상태 기계**:
+   ```
+   running ──result_proposal──> voting ──정족수 승인──> completed
+      ↑                           │
+      └────────반려(사유 전달)─────┘
+   running/voting ──> failed(fail_reason) | cancelled(사용자 취소)
+   fail_reason: budget | messages | idle | agent_error | no_quorum
+   ```
+   - **idle은 failed(idle)로 분류** — 결과물 없이 끝났으므로 실패.
+   - **agent_error**: 재시도 소진 후에도 실패하는 에이전트는 dead 처리하고 세션은
+     지속. 생존 에이전트가 1개 이하가 되면 failed(agent_error). 귀책(클라이언트 잘못
+     vs API 혼잡)을 세션 기록에 남긴다 — 오류 귀책 원칙.
+4. **idle 판정**: 모든 에이전트가 (a) 인박스 비어 있음 (b) LLM 호출 중 아님 상태로
+   `idle_timeout`초 지속되면 idle. 판정은 **세션의 단일 감시 태스크**가 수행
+   (에이전트 자체 판단 금지 — 판정 레이스 방지, 플레이키 테스트 예방).
+5. **화백 합의 (D-011)**: `submit_result` → 초안이 `result_proposal` 메시지로 전원
+   브로드캐스트, 세션 voting 전환. 다른 에이전트는 `vote_result(approve|reject, reason)`
+   도구로 투표. 정족수는 `termination.approval` — 기본 `unanimous`(제출자 제외 전원),
+   옵션 `majority` / `first`(투표 생략). reject 발생 시(unanimous 기준 1표면 충분) 반려 —
+   사유가 제출자에게 전달되고 running 복귀, 재제출 가능. `idle_timeout` 내 무투표는
+   기권 처리 — 기권 제외 전원 승인이면 확정, 유효 투표 0이면 failed(no_quorum).
+   voting 중에도 메시지/토큰 예산은 계속 강제.
 
 ## 디렉터리 구조 (목표)
 
@@ -57,10 +90,11 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 - 필수 문서 세트 생성, 방향 결정 확정.
 
 ### M1 — 계약 확정 (계약 우선 원칙)
-- `contracts.py`: `Message`(id/session_id/sender/recipients/type/content/created_at),
+- `contracts.py`: `Message`(id/session_id/sender/recipients/**type: chat|result_proposal|vote**/content/created_at),
   `AgentSpec`(name/role/system_prompt/model/max_turns),
-  `TeamConfig`(agents/termination: max_messages/token_budget/idle_timeout),
-  `Session`(id/task/status/result/usage).
+  `TeamConfig`(agents/termination: max_messages/token_budget/idle_timeout/**approval**),
+  `Session`(id/task/**status: running|voting|completed|failed|cancelled**/result/**fail_reason**/usage).
+  "코어 의미론" 절의 상태 기계·합의 규칙을 타입으로 강제한다.
 - `llm/base.py`: LLM 클라이언트 계약(프로바이더 중립 Protocol) 확정 — 요청/응답/사용량/
   도구 호출 표현을 프로바이더 특이사항 없이 정의 (D-009).
 - 팀 설정 YAML 스키마 확정 + 로더 + 검증 오류 메시지.
@@ -76,12 +110,15 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
   프롬프트 캐싱(시스템 프롬프트 고정 + messages 뒤에 추가, 명시적 cache breakpoint),
   재시도, 키 마스킹. 프로바이더 특이사항(파라미터/stop 사유 처리)은 어댑터 내부에 격리.
   (anthropic 어댑터는 후순위 — adaptive thinking, `refusal` stop_reason 등도 어댑터에 격리)
-- `agent.py`: 인박스 대기 → 새 메시지 수신 시 LLM 호출 → `send_message`/`submit_result`
-  tool_use 처리 → 반복. 에이전트별 대화 이력 유지.
-- `session.py`: 에이전트 기동/종료, 종료 정책 4종 강제, 토큰 사용량 집계.
+- `agent.py`: 인박스 대기 → 쌓인 메시지 배치 병합 → LLM 호출 →
+  `send_message`/`submit_result`/`vote_result` tool_use 처리 → 반복.
+  에이전트별 대화 이력 유지(이력 상한 절단 포함).
+- `session.py`: 에이전트 기동/종료, 상태 기계·종료 정책 강제(합의 확정/반려/no_quorum
+  포함), idle 감시 태스크, 토큰 사용량 집계.
 - 최소 실행 스크립트(`python -m hwabaek.run "태스크"`)로 콘솔에서 스모크 확인.
 - **완료 기준**: Fake LLM 테스트(밀폐) + 실 API 스모크 1회. 실패 경로 테스트
-  (토큰 예산 초과 / 메시지 상한 / API 오류 / refusal) 포함 — "실패 경로가 제품이다".
+  (토큰 예산 초과 / 메시지 상한 / API 오류 / 합의 반려 후 재제출 / no_quorum /
+  투표 중 기권 / idle) 포함 — "실패 경로가 제품이다".
 
 ### M3 — 서버
 - REST: `POST /sessions`(태스크 제출), `GET /sessions/{id}`, `POST /sessions/{id}/cancel`,
