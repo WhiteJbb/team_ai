@@ -119,8 +119,8 @@ src/hwabaek/
   consensus.py        # M2: ConsensusEngine — 제안/투표/정족수 판정만 반환 (D-016/D-021)
   session.py          # M2: SessionManager — 상태 전환 직렬화 + 타이머 2종 + 예산/생존 관리
   store/
-    base.py           # M2: Store Protocol (저장 계약) — D-017
-    sqlite.py         # M2: SQLite 구현 (ORM 금지, write-behind)
+    base.py           # M1: Store Protocol (저장 계약) — D-017, 확정됨
+    sqlite.py         # M2b: SQLite 구현 (ORM 금지, write-behind)
   llm/
     base.py           # M1: LLM 클라이언트 계약 (프로바이더 중립 Protocol) — D-009
     openai_client.py  # M2: openai SDK 어댑터 (재시도/스트리밍/캐싱/키 마스킹)
@@ -160,19 +160,22 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
   하위호환) / 투표 대상 스냅샷 불변(with_voter_removed 삭제) / 상태별 허용 명령표
   (`ALLOWED_COMMANDS`) / Message.sequence·자기송신 금지 / Event 봉투(event_id·
   sequence·created_at) / FailReason.interrupted / ErrorCategory.
-- **M1 잔여 (M2 착수 시 계약 먼저)**: Store Protocol(`store/base.py`) 확정,
-  도메인 이벤트 세분 taxonomy 확정(EventContract §8 후보 — 발행 지점과 함께).
+- **M1 잔여 처리**: Store Protocol(`store/base.py`) 확정 완료(2026-07-14 — 세션/팀
+  스냅샷/메시지/제안/투표/이벤트 조회 계약 + `validate_vote` 순수 함수 추가).
+  도메인 이벤트 세분 taxonomy 확정만 M2로 이월(EventContract §8 후보 — 발행 지점과 함께).
 
 ### M2 — 코어 엔진 (서버 없이 동작)
 
 두 단계로 나눠 진행한다 (D-025 — 통합 리스크 축소):
 - **M2a**: 인메모리 코어 — bus / consensus / session / agent + Fake LLM 통합 테스트
   + CLI smoke. store 없이 완결 동작이 완료 기준.
-- **M2b**: `store/base.py` 계약 확정 → `store/sqlite.py` 접목 + 도메인 이벤트
+- **M2b**: `store/sqlite.py` 접목(계약은 M1에서 확정됨) + 도메인 이벤트
   taxonomy 확정(EventContract §8) + 실 API 스모크.
 
-- `store/base.py` 계약 확정 후 `store/sqlite.py` 구현 (D-017, M2b): sessions / agents /
-  messages / proposals / votes / decisions / usage_events / session_events.
+- `store/sqlite.py` 구현 (D-017, M2b — 계약은 `store/base.py`에 확정): 스키마는
+  계약의 레코드(sessions/팀 스냅샷=agents/messages/proposals/votes/session_events)에
+  대응. decisions/usage_events는 파생 가능(승인 제안+투표 / usage 이벤트) —
+  별도 테이블 여부는 M2b 스키마 확정 시 결정.
 - `bus.py`: asyncio 기반 인박스/브로드캐스트(발신자 제외), 세션 sequence 부여,
   중복 id 무시, 원자적 drain — 관측용 이벤트 훅.
 - **착수 전 스파이크**: ChatGPT subscription 연동(Sign in with ChatGPT OAuth, BYOS)으로

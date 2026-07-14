@@ -634,6 +634,34 @@ class VoteTally:
         return ProposalOutcome.PENDING
 
 
+def validate_vote(vote: Vote, proposal: ResultProposal) -> None:
+    """투표 1건을 활성 제안에 대해 검증한다 — M2 ConsensusEngine의 단일 검증 지점.
+
+    제안 수준 불변조건만 여기서 강제한다:
+    - 같은 세션의 투표여야 한다.
+    - 현재 활성 제안을 가리켜야 한다 — 이전/미지의 proposal_id는 거부
+      (늦은 투표 무시 규칙의 계약 표면, D-016).
+    - pending이 아닌 제안(반려·확정·대체됨)에는 투표할 수 없다.
+    - 제출자는 자기 제안에 투표할 수 없다 (D-020).
+
+    심의자 자격(스냅샷 포함 여부)과 중복 투표는 VoteTally.with_vote가 강제한다 —
+    검증 로직을 중복하지 않는다.
+    """
+    if vote.session_id != proposal.session_id:
+        raise ContractError("vote and proposal belong to different sessions")
+    if vote.proposal_id != proposal.id:
+        raise ContractError(
+            f"vote references proposal {vote.proposal_id!r}, but the active proposal "
+            f"is {proposal.id!r} (late or unknown votes are ignored)"
+        )
+    if proposal.status is not ProposalStatus.PENDING:
+        raise ContractError(
+            f"cannot vote on a proposal with status {proposal.status.value!r}"
+        )
+    if vote.voter == proposal.proposer:
+        raise ContractError("proposer cannot vote on its own proposal")
+
+
 # ---------------------------------------------------------------------------
 # 세션 — 상태 기계
 # ---------------------------------------------------------------------------

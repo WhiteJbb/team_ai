@@ -2,6 +2,31 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M1 계약 구현 마감: Store 계약 + 투표 검증 함수 (feat/m1-contracts)
+
+### 진행한 작업
+- M1 계약 구현 지시에 따라 working tree·기존 테스트 재확인 후 잔여 범위만 구현.
+  지시 범위 대부분(스키마 전체·로더·명령 허용표·오류 분류·테스트 249개)은 기구현
+  상태였고, 실제 잔여는 2건:
+  - **Store 계약** (`store/base.py`, 직접 작성): 저장 인터페이스만 정의(D-017,
+    SQLite 구현은 M2b) — 세션 upsert/조회, 재시작 시 running·voting 식별
+    (interrupted 처리용), 팀 스냅샷(재현성), 메시지 타임라인(sequence 순),
+    제안 버전 이력·투표, 이벤트 after_sequence 조회(Last-Event-ID 재개),
+    append 중복 id 무시(D-023).
+  - **`contracts.validate_vote`** (직접 작성): 제안 수준 투표 검증의 단일 지점 —
+    세션 일치, 활성 proposal_id 일치(늦은 투표 거부), pending 전용, 자기 투표
+    금지. 심의자 자격·중복 투표는 VoteTally.with_vote가 기존대로 강제(중복 금지
+    원칙에 따라 분리).
+- 테스트 위임(sonnet): test_store_contract.py(테스트 전용 InMemoryStore로 계약
+  의미 적합성 검증, 19개) + TestValidateVote(6개). 전체 **274개, 3회 반복 통과**.
+- Plan 갱신: M1 잔여에서 Store Protocol 완료 처리 (taxonomy만 M2 이월).
+
+### 문서와 다르게 구현하지 않은 것 (설계 노트)
+- AgentRuntime 계약: D-015가 "현재 미도입"으로 확정 → 추가하지 않음.
+- DomainEvent: 기존 Event가 봉투 계약(D-022) — 별도 타입 신설·개명 없음.
+- D-017 테이블 중 decisions/usage_events는 승인 제안+투표/usage 이벤트로 파생
+  가능 — 별도 메서드 없이 M2b 스키마 확정 시 결정 (store/base.py 독스트링 명시).
+
 ## 2026-07-14 — 설계 자체 검토 개선 4건 반영 (feat/m1-contracts, D-025)
 
 ### 진행한 작업

@@ -1561,5 +1561,61 @@ class TestBoolRejection(unittest.TestCase):
             TerminationPolicy(idle_timeout=True)
 
 
+# ---------------------------------------------------------------------------
+# validate_vote — 제안 수준 불변조건 검증 (D-016)
+# 심의자 자격(voters 스냅샷 포함 여부)과 중복 투표는 VoteTally.with_vote 소관이라
+# 여기서는 다루지 않는다.
+# ---------------------------------------------------------------------------
+
+from hwabaek.contracts import validate_vote
+
+
+class TestValidateVote(unittest.TestCase):
+    def test_valid_vote_by_other_agent_passes(self) -> None:
+        # 활성(pending) 제안에 타인이 투표 → 예외 없음.
+        proposal = _result_proposal(proposer="writer")
+        vote = _vote_record(voter="critic")
+        validate_vote(vote, proposal)  # 예외가 발생하지 않아야 통과.
+
+    def test_session_mismatch_raises(self) -> None:
+        # 세션이 다른 투표는 거부.
+        proposal = _result_proposal(session_id="s1")
+        vote = _vote_record(session_id="s2")
+        with self.assertRaises(ContractError):
+            validate_vote(vote, proposal)
+
+    def test_proposal_id_mismatch_raises_with_both_ids_in_message(self) -> None:
+        # 늦은/미지의 투표: 활성 제안과 다른 proposal_id는 거부하고 두 id를 메시지에 남긴다.
+        proposal = _result_proposal(id="p1")
+        vote = _vote_record(proposal_id="p2")
+        with self.assertRaises(ContractError) as ctx:
+            validate_vote(vote, proposal)
+        self.assertIn("p1", str(ctx.exception))
+        self.assertIn("p2", str(ctx.exception))
+
+    def test_rejected_proposal_rejects_vote(self) -> None:
+        # pending이 아닌(REJECTED) 제안에는 투표할 수 없다.
+        proposal = _result_proposal().with_status(ProposalStatus.REJECTED)
+        vote = _vote_record()
+        with self.assertRaises(ContractError):
+            validate_vote(vote, proposal)
+
+    def test_superseded_proposal_rejects_vote(self) -> None:
+        # pending이 아닌(SUPERSEDED) 제안에는 투표할 수 없다.
+        proposal = (_result_proposal()
+                    .with_status(ProposalStatus.REJECTED)
+                    .with_status(ProposalStatus.SUPERSEDED))
+        vote = _vote_record()
+        with self.assertRaises(ContractError):
+            validate_vote(vote, proposal)
+
+    def test_proposer_self_vote_rejected(self) -> None:
+        # 제출자는 자기 제안에 투표할 수 없다 (D-020).
+        proposal = _result_proposal(proposer="writer")
+        vote = _vote_record(voter="writer")
+        with self.assertRaises(ContractError):
+            validate_vote(vote, proposal)
+
+
 if __name__ == "__main__":
     unittest.main()
