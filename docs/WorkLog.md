@@ -2,6 +2,20 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M1 머지 (PR #1) + 저장소 이름 변경
+
+### 진행한 작업
+- M1 PR(#1)을 squash merge로 main에 병합, 작업 브랜치 삭제 (규칙 7 워크플로우).
+  main 검증: 전체 테스트 274개 통과.
+- GitHub 저장소 이름을 `team_ai` → **`hwabaek`**으로 변경 (사용자 수행, D-010 정합).
+  로컬 origin URL 갱신: https://github.com/WhiteJbb/hwabaek.git
+
+### 다음 할 일
+- M2a 착수 전 스파이크: ChatGPT subscription(OAuth) 연동 검증 + GPT-5.6 모델 ID 확정
+- M2a: `feat/m2a-core` 브랜치 — bus / ConsensusEngine / SessionManager / agent 루프
+  + Fake LLM 통합 + CLI smoke
+- 기본 팀 초안(configs/team.default.yaml) 사용자 확인 (Plan 미결)
+
 ## 2026-07-14 — M1 계약 구현 마감: Store 계약 + 투표 검증 함수 (feat/m1-contracts)
 
 ### 진행한 작업
