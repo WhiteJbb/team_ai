@@ -146,7 +146,7 @@ payload는 `Message.to_dict()`와 동일 스키마.
 
 | 상황 | 발행 이벤트 | 비고 |
 |---|---|---|
-| 세션 생성(초기 `running`) | `session_status` | 초기 sequence 부여는 서버(M3) 구현 사항. |
+| 세션 생성(초기 `running`) | `session_status` | 세션의 첫 이벤트로 sequence `0`을 부여한다. |
 | `send_message` chat 발신 | `message` | |
 | `submit_result` 호출 (running에서만) | `message`(`result_proposal`) + `session_status`(`voting`) + `vote_status`(빈 집계 초기 스냅샷) | `running→voting`. 반려 후 재제출은 version이 오른 새 제안(D-016). voting 중 중복 submit은 거부되어 이벤트 없음. |
 | `vote_result` 호출 | `message`(`vote`) + `vote_status` | 투표는 브로드캐스트 메시지로도 남음(화백 원칙). 이전 제안에 대한 늦은 투표는 무시되어 `vote_status` 미발행. |
@@ -164,15 +164,31 @@ payload는 `Message.to_dict()`와 동일 스키마.
 ## 5. 재구독 복원 규칙
 
 - 새로고침 시 먼저 REST로 세션 스냅샷/이력을 복원한 뒤 SSE를 재구독한다(IA.md 내비게이션).
-- 재구독 시 복원한 이력의 마지막 `sequence`를 `Last-Event-ID` 헤더로 실어 보낸다. 서버는
-  그 `sequence`보다 큰 이벤트부터 재개한다. `event_id`는 재구독 기준이 아니다 — 전역 유일
-  식별자로서 감사·중복 배달 판별 등 별도 용도로 쓰이며 `sequence`와 혼동하지 않는다.
-- 헤더 없는 최초 구독의 시작 지점과 REST 이력 API 형태는 M3에서 확정 — `sequence`가
-  복원의 유일한 기준이라는 원칙만 여기서 못박는다.
-- SSE 와이어 포맷(`id:`에 `sequence`를 싣는지 등)은 M3 구현 시 확정하고 이 문서에 반영한다.
-- 서버측 실제 재전송(backlog replay) 구현은 M3~M5로 미룬다. 다만 이 봉투 계약
-  (`sequence` 세션 내 단조 증가, `event_id` 전역 유일)은 지금부터 그 구현과 호환되도록
-  설계되어 있으며, 재전송 기능 도입 시 봉투 필드 변경 없이 얹을 수 있다.
+- 연결이 끊겼다가 재개될 때 마지막으로 받은 SSE `id`(`sequence`)를
+  `Last-Event-ID` 헤더로 보낸다. 서버는 그 sequence보다 큰 이벤트부터 재개한다.
+  `event_id`는 감사·중복 배달 판별용 전역 유일 식별자이며 재구독 기준이 아니다.
+- 헤더 없는 최초 구독은 sequence `-1` 이후, 즉 저장된 전체 이벤트를 오래된 순서로
+  재전송한 뒤 라이브 스트림으로 이어진다. 현재 runner의 메모리 이벤트 로그 또는
+  SQLite 이벤트 이력에서 재전송한다.
+- SSE 와이어 프레임은 아래와 같다. `id:`에는 `sequence`, `event:`에는 이벤트 타입,
+  `data:`에는 §1의 전체 이벤트 봉투 JSON을 한 줄로 싣고 빈 줄로 프레임을 끝낸다.
+
+  ```text
+  id: 12
+  event: session_status
+  data: {"event_id":"...","session_id":"...","type":"session_status","sequence":12,...}
+
+  ```
+
+- 종료 세션은 backlog를 모두 보낸 뒤 스트림을 닫는다. 활성 세션은 backlog 뒤에 새
+  이벤트를 이어 보내며, 재전송 도중 발생한 이벤트도 누락·중복 없이 sequence 순서로 전달한다.
+- 같은 연결의 자동 재접속은 SSE `id`로 받은 마지막 sequence를 기준으로 재개한다.
+  새 페이지 로드·새로고침은 REST 스냅샷을 복원한 뒤 `Last-Event-ID` 없이 SSE 전체
+  backlog를 받고, 이미 복원한 레코드는 `event_id`나 도메인 레코드 id로 멱등 적용한다.
+- `Last-Event-ID`가 음수·비정수이거나 SQLite 정수 범위를 넘으면 스트림을 열기 전에
+  HTTP 400으로 거부한다.
+- 라이브 이벤트를 충분히 빨리 소비하지 못해 서버 큐 상한을 넘긴 연결은 종료될 수 있다.
+  클라이언트는 마지막으로 적용한 SSE `id`를 기준으로 재접속해 누락분을 복원한다.
 
 ## 6. 대시보드 소비 매핑 (IA.md SC-03)
 
@@ -201,15 +217,10 @@ payload는 `Message.to_dict()`와 동일 스키마.
 신규 타입으로 확장하며, 봉투는 이미 호환된다. `limit.warning`(예산 임박)은 현재
 별도 이벤트가 없다 — usage 이벤트에서 token_budget 대비 비율로 판단한다.
 
-아래는 참고 매핑이다:
+아래는 코드의 6개 집계 타입을 설명하기 위한 논리 이벤트 참고 목록이다. 별도 enum이나
+와이어 타입이 아니며, 소비자는 §3 payload와 §4 발행 규칙을 계약으로 사용한다.
 
-내부 도메인 이벤트(엔진이 상태 변화를 인식하는 세분 단위)와 SSE로 전송되는 집계 이벤트
-(§2의 6개 `EventType`)는 서로 다른 개념이다. 전자는 엔진 내부의 발행 지점(버스/세션
-엔진/합의 엔진)이 인식하는 세분화된 사건이고, 후자는 대시보드가 구독하는 고정 봉투의
-6개 타입이다. M2 엔진이 각 발행 지점을 실제로 구현하면서 아래 후보 목록을 확정한다 —
-이 문서는 확정 전 후보만 기록한다.
-
-### 8.1 후보 목록
+### 8.1 논리 이벤트 예시
 
 - `session.created` / `session.started` / `session.status_changed` / `session.completed` /
   `session.failed` / `session.cancelled`
@@ -220,9 +231,9 @@ payload는 `Message.to_dict()`와 동일 스키마.
 - `usage.updated`
 - `limit.warning` / `limit.exceeded`
 
-### 8.2 SSE 집계 타입과의 매핑 (예상)
+### 8.2 SSE 집계 타입과의 확정 매핑
 
-| 내부 도메인 이벤트 (후보) | SSE `EventType` |
+| 논리 이벤트 | SSE `EventType` |
 |---|---|
 | `session.status_changed` / `session.completed` / `session.failed` / `session.cancelled`<br>(`session.created`/`session.started`는 초기 발행에 대응) | `session_status` |
 | `message.sent` | `message` |
@@ -232,8 +243,9 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | `proposal.approved` | `result` |
 
 `proposal.created`/`proposal.rejected`/`proposal.superseded`, `vote.rejected`,
-`message.delivered`/`message.batch_consumed`, `limit.warning`/`limit.exceeded` 등 나머지
-후보의 SSE 매핑(신규 `EventType` 추가 여부 포함)은 M2 구현 시 확정한다.
+`message.delivered`/`message.batch_consumed`는 별도 SSE 타입이 아니라 현재 집계 이벤트의
+payload와 저장 레코드로 표현한다. `limit.warning`은 `usage`, 한도 초과 종료는
+`session_status`의 `fail_reason`으로 표현한다.
 
 ### 8.3 호환 원칙
 
