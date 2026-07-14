@@ -2,6 +2,24 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 기본 팀 확정(대등 3인) + capabilities 도구 권한 (feat/m2a-core, D-027)
+
+### 진행한 작업
+- 사용자 최종안 채택: 기본 팀을 **research_daedeung / critic_daedeung /
+  sangdaedeung** 3인 구조로 교체 (첫 턴 행동 강제, 반대를 위한 반대 방지,
+  투표·메시지 구분 프롬프트 포함). 제한: 60msg/100k tokens/idle 45s/voting 120s.
+- **capabilities 계약 신설** (직접 작성): `AgentCapability` 3종 + `AgentSpec.
+  capabilities`(기본 전체 권한) + TeamConfig 검증 2건(제출 가능 에이전트 필수,
+  비-first 모드에서 각 제출자마다 다른 투표 가능 에이전트 필요). SessionManager
+  `_guard`에 권한 축 추가(상태 축과 이중 검증), **심의자 스냅샷 자격 = 생존 ∧
+  vote_result 권한**으로 갱신 — 검토에서 발견한 스냅샷-권한 상호작용 버그
+  (투표 불가 심의자 → unanimous 상시 no_quorum) 사전 차단.
+- 사용자 제안에서 3건 조정(D-027에 근거 기록): 기본값 전체 권한(하위 호환),
+  ToolError 재사용, (str, Enum) 관례 유지.
+- 병렬 위임: 로더 capabilities 파싱 + 기본 팀 검증(sonnet, 테스트 39개),
+  계약·통합 capability 테스트(opus, +13개 — 권한 밖 submit 거부, 스냅샷 제외).
+- 전체 테스트 **377개, 3회 반복 통과** + --fake 스모크 + 기본 팀 로드 확인.
+
 ## 2026-07-14 — M2a 코어 엔진 구현 (feat/m2a-core)
 
 ### 진행한 작업

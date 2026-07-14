@@ -63,12 +63,19 @@ termination:             # 종료 정책 (전부 선택)
     timeout_seconds: 120 # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
     minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
 agents:                  # 1명 이상
-  - name: researcher     # 필수
+  - name: sangdaedeung   # 필수
     role: ...            # 필수 — 대시보드 표시용
     system_prompt: ...   # 필수
     model: ...           # 선택 — 에이전트별 오버라이드
     max_turns: 50        # 선택 — 에이전트당 LLM 호출 상한
+    capabilities:        # 선택 — 생략 시 전체. 런타임이 권한 밖 호출을 거부 (D-027)
+      - send_message     #   send_message | submit_result | vote_result
+      - submit_result
 ```
+
+기본 팀은 화백 컨셉의 **대등 3인 구조**입니다 — 조사 대등(research_daedeung),
+견제 대등(critic_daedeung), 상대등(sangdaedeung, 진행·종합·제출). 상대등이 제출한
+안을 나머지 두 대등이 모두 승인해야 의결됩니다.
 
 허용되지 않은 키는 오타로 간주해 로드 시 즉시 거부됩니다(파일·필드 경로를 포함한
 오류 메시지). 대시보드가 구독하는 이벤트 스트림 계약은

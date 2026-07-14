@@ -26,6 +26,7 @@ from hwabaek.contracts import (
     TerminationPolicy,
     Usage,
 )
+from hwabaek.contracts import AgentCapability
 from hwabaek.llm.base import LLMServerError
 from hwabaek.llm.fake import text_response, tool_response
 from hwabaek.session import SessionManager
@@ -514,6 +515,131 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("discuss the draft before voting" in e.payload["content"] for e in chats)
         )
+
+    # -----------------------------------------------------------------------
+    # 권한(capabilities, D-027) 축 — 조립 헬퍼
+    # -----------------------------------------------------------------------
+    def _build_with_capabilities(
+        self,
+        agents_scripts,
+        *,
+        mode: ApprovalPolicy = ApprovalPolicy.UNANIMOUS,
+        idle_timeout: float = 1.0,
+        voting_timeout: float = 1.0,
+        max_messages: int = 100,
+        token_budget: int = 200_000,
+        task: str = "produce the deliverable",
+    ):
+        """_build와 동일하나 (name, script, capabilities) 3튜플로 에이전트별 권한을 지정한다.
+
+        권한 강제는 메시지 흐름으로 검증하므로 타이머는 넉넉히 둬(기본 1.0s) 정상
+        승인 경로를 idle/voting 만료가 선점하지 않게 한다 — 완료는 승인 트리거로
+        빠르게 일어나므로 고정 sleep은 쓰지 않는다.
+        """
+        specs = tuple(
+            AgentSpec(
+                name=name,
+                role="tester",
+                system_prompt="You are a hermetic test agent.",
+                capabilities=capabilities,
+            )
+            for name, _, capabilities in agents_scripts
+        )
+        team = TeamConfig(
+            name="team",
+            agents=specs,
+            termination=TerminationPolicy(
+                max_messages=max_messages,
+                token_budget=token_budget,
+                idle_timeout=idle_timeout,
+                approval=ApprovalConfig(mode=mode, voting_timeout=voting_timeout),
+            ),
+        )
+        fakes = {name: ScriptedLLM(script) for name, script, _ in agents_scripts}
+        coll = _Collector()
+        counter = itertools.count()
+
+        def id_factory() -> str:
+            return f"id-{next(counter):05d}"
+
+        manager = SessionManager(
+            team,
+            task,
+            llm_factory=lambda spec: fakes[spec.name],
+            clock=lambda: CLOCK,
+            id_factory=id_factory,
+            on_event=coll,
+        )
+        return manager, coll, fakes
+
+    # -----------------------------------------------------------------------
+    # 14) 권한 밖 submit 거부 (투표 전용 에이전트의 submit_result -> tool error)
+    # -----------------------------------------------------------------------
+    async def test_submit_without_capability_is_rejected(self) -> None:
+        """제출 권한이 없는(투표 전용) 에이전트가 running 중 submit_result를 시도하면
+        capability 가드가 tool error로 되돌리고 세션은 계속된다. 제출 권한을 가진
+        proposer가 정상 제출하고 전원 승인해 completed — 제안 메시지는 정확히 1건."""
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        send_vote = frozenset(
+            {AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT}
+        )
+        manager, coll, _ = self._build_with_capabilities([
+            # proposer는 즉시 제출하지 않고(running 유지) 요청을 받은 뒤 제출한다 —
+            # analyst의 submit 시도가 running 상태에서 일어나 상태 가드가 아니라
+            # capability 가드로 거부되도록 보장한다.
+            ("proposer", [_text(), _submit("the final deliverable")], submit_only),
+            # analyst: running에서 submit 시도(권한 없음 -> 거부) -> proposer에게
+            # 제출 요청 -> 유휴 -> 제안 수신 후 승인.
+            (
+                "analyst",
+                [
+                    _submit("analyst has no submit right"),
+                    _chat("please submit the result", ["proposer"]),
+                    _text(),
+                    _vote("approve"),
+                ],
+                send_vote,
+            ),
+            ("reviewer", [_text(), _vote("approve")], send_vote),
+        ])
+        session = await self._run(manager)
+
+        # proposer만 제출에 성공 — analyst의 submit은 제안을 만들지 못했다.
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.submitted_by, "proposer")
+        self.assertEqual(session.result, "the final deliverable")
+        proposals = coll.messages(MessageType.RESULT_PROPOSAL)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].payload["sender"], "proposer")
+
+    # -----------------------------------------------------------------------
+    # 15) 심의자 스냅샷 자격 제외 (투표 권한 없는 생존 에이전트는 voters에서 빠짐)
+    # -----------------------------------------------------------------------
+    async def test_snapshot_excludes_agent_without_vote_capability(self) -> None:
+        """proposer 제출 시 심의자 스냅샷 = 생존 & vote_result. observer는 살아있지만
+        투표 권한이 없어 스냅샷에서 제외되므로 voter1의 approve 1표로 unanimous 확정.
+        vote_status의 어떤 그룹에도 observer가 등장하지 않는다."""
+        manager, coll, _ = self._build_with_capabilities([
+            ("proposer", [_submit("the deliverable")],
+             frozenset({AgentCapability.SUBMIT_RESULT})),
+            ("voter1", [_text(), _vote("approve")],
+             frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT})),
+            ("observer", [_text()],
+             frozenset({AgentCapability.SEND_MESSAGE})),
+        ])
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.submitted_by, "proposer")
+        self.assertEqual(session.result, "the deliverable")
+        # 최소 1건의 vote_status가 발행되었고, 어떤 이벤트/그룹에도 observer가 없다.
+        vote_events = coll.vote_status()
+        self.assertTrue(vote_events)
+        for e in vote_events:
+            for group in ("pending", "approvals", "rejections", "abstained"):
+                self.assertNotIn("observer", e.payload[group])
+        # 확정 시점 스냅샷 = {voter1} — voter1이 유일한 승인자로 집계된다.
+        self.assertIn("voter1", vote_events[-1].payload["approvals"])
 
 
 if __name__ == "__main__":

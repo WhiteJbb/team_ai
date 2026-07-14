@@ -25,6 +25,7 @@ from hwabaek.bus import MessageBus
 from hwabaek.consensus import ConsensusEngine, ConsensusError, ConsensusState
 from hwabaek.contracts import (
     BROADCAST,
+    AgentCapability,
     AgentSpec,
     AgentState,
     ContractError,
@@ -94,6 +95,7 @@ class SessionManager:
         self._agent_states: dict[str, AgentState] = {
             name: AgentState.IDLE for name in agent_names
         }
+        self._specs: dict[str, AgentSpec] = {spec.name: spec for spec in team.agents}
         self._per_agent_usage: dict[str, Usage] = {}
         self._event_seq = 0
         self._done = asyncio.Event()
@@ -155,12 +157,20 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def _guard(self, command: str, sender: str) -> None:
+        """상태별 허용 규칙(§17) + 에이전트별 권한(D-027)의 이중 검증."""
         allowed = allowed_commands(self._session.status)
         if command not in allowed:
             note = f"{command} rejected: session is {self._session.status.value}"
             if self._session.is_terminal:
                 self._rejected_commands.append(f"{sender}: {note}")
             raise ToolError(note)
+        spec = self._specs.get(sender)
+        if spec is not None and command not in {
+            capability.value for capability in spec.capabilities
+        }:
+            raise ToolError(
+                f"{command} rejected: agent {sender!r} does not have this capability"
+            )
 
     def send_message(self, sender: str, recipients: list[str], content: str) -> str:
         self._guard("send_message", sender)
@@ -177,9 +187,12 @@ class SessionManager:
 
     def submit_result(self, sender: str, content: str) -> str:
         self._guard("submit_result", sender)
+        # 심의자 스냅샷 자격 = 생존 ∧ vote_result 권한 (D-018/D-027) — 투표할 수
+        # 없는 에이전트를 심의자로 넣으면 unanimous가 항상 no_quorum이 된다.
         alive = frozenset(
             name for name, state in self._agent_states.items()
             if state is not AgentState.DEAD
+            and AgentCapability.VOTE_RESULT in self._specs[name].capabilities
         )
         try:
             state = self._consensus.open_proposal(sender, content, alive)
