@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 환경/비밀
+.env
+*.key
+
+# 세션 데이터 (로컬 실행 산출물)
+data/
+sessions/
+
+# 에디터/OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# 테스트/커버리지
+.coverage
+htmlcov/
+.pytest_cache/
