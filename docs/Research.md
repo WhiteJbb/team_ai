@@ -68,8 +68,8 @@
 - **FastAPI + uvicorn**: asyncio 네이티브 (요청 경로 블로킹 금지 제약과 부합). (D-006)
 - **SSE vs WebSocket**: 대시보드는 서버→클라이언트 단방향 스트림이면 충분 → SSE.
   사용자 입력(제출/취소)은 REST.
-- 세션 영속화: 초기에는 JSONL 파일(세션당 1파일, append) 검토 — write-behind로
-  요청 경로 블로킹 회피. DB 도입은 필요해질 때 (M3에서 확정).
+- 세션 영속화: ~~초기에는 JSONL 파일 검토~~ → **SQLite EventStore로 확정 (D-017)** —
+  의결 기록(제안/투표/결정)의 구조적 조회가 필요. write-behind로 요청 경로 블로킹 회피.
 
 ## 5. 미조사 / 추후 조사
 

@@ -2,6 +2,35 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 합의 의미론 개정 + Hermes 미도입 확정 (feat/m1-contracts, M1 PR에 포함)
+
+### 진행한 작업
+- 사용자 설계 검토 지시 반영. PR 미오픈 상태라 M1 브랜치에서 계약을 최종본으로 개정
+  (이미 폐기 결정된 의미론을 main에 올리지 않기 위해).
+- **결정 기록**: D-015(Hermes 미도입 — 코어 직접 소유 유지, 후순위 실험으로만 기록),
+  D-016(합의 의미론 개정 — 정족수 4종·제안 버전·voting 잠금, D-011 개정),
+  D-017(SQLite EventStore, JSONL 검토안 대체).
+- **계약 개정 (contracts.py, 직접 작성)**: ApprovalPolicy에 `participating_unanimous`
+  추가·의미 재정의(unanimous 엄밀화 — 미투표는 승인 아님, majority는 생존 전체 과반),
+  `VoteTally.decide` 재작성 + `with_voter_removed`(사망 시 정족수 재계산),
+  `ResultProposal`(version) 신설, RESULT_PROPOSAL 메시지에 proposal_id 필수화.
+- **테스트 개정 (opus 위임)**: decide 매트릭스 전면 재작성 + 정책 대비 테스트
+  (동일 tally에 unanimous=NO_QUORUM vs participating=APPROVED) + ResultProposal +
+  사망 재계산. 167 → 190개, 전부 통과(3회 반복 확인).
+- **계획 갱신 (Plan.md)**: 코어 의미론 §5 재작성, M2에 consensus.py 모듈 분리·
+  AgentRuntime 결합도 노트(추상화는 현재 미도입), M2 완료 기준 테스트 목록 확장
+  (version 증가/늦은 투표 무시/중복 submit 거부/사망 정족수/voting 중 예산/
+  idle-voting 레이스/종료 후 거부), M3에 SQLite EventStore. EventContract/README/
+  configs/Research 정합화.
+
+### 오류/이슈
+- 없음. (구 의미론 기준 테스트 5건이 예상대로 실패 → 새 의미론으로 개정)
+
+### 미구현 후순위 (의도적)
+- 엔진 수준 강제(voting 잠금 실행, 늦은 투표 무시, idle/voting 레이스) — M2
+- SQLite EventStore 구현 — M3 (계획만 갱신)
+- HermesAgentRuntime / AgentRuntime Protocol — 미도입 (D-015)
+
 ## 2026-07-14 — M1 계약 확정 구현 (feat/m1-contracts)
 
 ### 진행한 작업

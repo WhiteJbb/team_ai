@@ -52,13 +52,23 @@
 4. **idle 판정**: 모든 에이전트가 (a) 인박스 비어 있음 (b) LLM 호출 중 아님 상태로
    `idle_timeout`초 지속되면 idle. 판정은 **세션의 단일 감시 태스크**가 수행
    (에이전트 자체 판단 금지 — 판정 레이스 방지, 플레이키 테스트 예방).
-5. **화백 합의 (D-011)**: `submit_result` → 초안이 `result_proposal` 메시지로 전원
-   브로드캐스트, 세션 voting 전환. 다른 에이전트는 `vote_result(approve|reject, reason)`
-   도구로 투표. 정족수는 `termination.approval` — 기본 `unanimous`(제출자 제외 전원),
-   옵션 `majority` / `first`(투표 생략). reject 발생 시(unanimous 기준 1표면 충분) 반려 —
-   사유가 제출자에게 전달되고 running 복귀, 재제출 가능. `idle_timeout` 내 무투표는
-   기권 처리 — 기권 제외 전원 승인이면 확정, 유효 투표 0이면 failed(no_quorum).
-   voting 중에도 메시지/토큰 예산은 계속 강제.
+5. **화백 합의 (D-011, D-016 개정)**:
+   - **제안**: `submit_result`는 running에서만 허용. 호출 시 `ResultProposal`
+     (id/proposer/**version**/content) 레코드가 생성되고, `result_proposal` 메시지
+     (proposal_id 포함)로 전원 브로드캐스트, 세션 voting 전환. **voting 중 추가
+     `submit_result`는 도메인 오류로 거부**하며, 반려로 running 복귀한 뒤에만
+     version을 올린 새 제안을 제출할 수 있다.
+   - **투표**: voting 중에는 현재 제안에 대한 `vote_result(approve|reject, reason)`만
+     허용. 모든 투표는 proposal_id 필수 — **이전 제안에 대한 늦은 투표는 무시**한다.
+   - **정족수** (`termination.approval`, 기권은 어떤 정책에서도 승인이 아님):
+     `unanimous`(기본) = 생존 심의자(제출자 제외) **전원** approve — 투표 시간 만료
+     시 미투표자가 있으면 승인하지 않고 failed(no_quorum) / `majority` = 생존 심의자
+     **전체의 과반** approve / `participating_unanimous` = 유효 투표자 전원 approve
+     (기권 제외 판정) / `first` = 투표 생략 즉시 확정.
+   - **판정**: reject 발생 시(unanimous·participating 기준 1표) 반려 — 사유가 제출자에게
+     전달되고 running 복귀. 심의 중 사망한 에이전트는 심의 대상에서 제외해 정족수를
+     재계산한다(`VoteTally.with_voter_removed`). voting 중에도 메시지/토큰 예산은
+     계속 강제.
 
 ## 디렉터리 구조 (목표)
 
@@ -67,7 +77,9 @@ src/hwabaek/
   contracts.py        # M1: 메시지/에이전트/팀/세션 스키마 (dataclass + 검증)
   bus.py              # M2: 비동기 메시지 버스 (에이전트별 인박스)
   agent.py            # M2: 에이전트 런타임 (LLM 툴 루프)
-  session.py          # M2: 세션 수명주기 + 종료 정책 + 사용량 집계
+  consensus.py        # M2: 제안 버전 관리 + 투표 등록 + 정족수 판정 (D-016)
+  session.py          # M2: 세션 수명주기 + 상태 전환 조정 + idle 감시 + 예산/생존 관리
+  eventstore.py       # M3: 저장 인터페이스 + SQLite 구현 (D-017)
   llm/
     base.py           # M1: LLM 클라이언트 계약 (프로바이더 중립 Protocol) — D-009
     openai_client.py  # M2: openai SDK 어댑터 (재시도/스트리밍/캐싱/키 마스킹)
@@ -114,19 +126,34 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
   (anthropic 어댑터는 후순위 — adaptive thinking, `refusal` stop_reason 등도 어댑터에 격리)
 - `agent.py`: 인박스 대기 → 쌓인 메시지 배치 병합 → LLM 호출 →
   `send_message`/`submit_result`/`vote_result` tool_use 처리 → 반복.
-  에이전트별 대화 이력 유지(이력 상한 절단 포함).
-- `session.py`: 에이전트 기동/종료, 상태 기계·종료 정책 강제(합의 확정/반려/no_quorum
-  포함), idle 감시 태스크, 토큰 사용량 집계.
+  에이전트별 대화 이력 유지(이력 상한 절단 포함). 실행부는 세션·합의 로직과
+  결합하지 않게 유지 — 필요해지면 AgentRuntime Protocol로 추출(D-015),
+  현재는 별도 Runtime 추상화를 만들지 않는다.
+- `consensus.py`: 제안 생성(version 증가), 투표 등록(proposal_id 검증 — 이전 제안에
+  대한 늦은 투표 무시), `contracts.VoteTally` 기반 정족수 판정, 승인/반려/no_quorum
+  처리. 합의 로직의 테스트 가능한 경계.
+- `session.py`: 에이전트 기동/종료, 상태 전환 조정(voting 잠금 — running에서만
+  submit_result, voting 중 중복 submit은 도메인 오류), idle 감시 태스크, 취소,
+  예산·생존 에이전트 관리(사망 시 정족수 재계산 위임).
 - 최소 실행 스크립트(`python -m hwabaek.run "태스크"`)로 콘솔에서 스모크 확인.
 - **완료 기준**: Fake LLM 테스트(밀폐) + 실 API 스모크 1회. 실패 경로 테스트
-  (토큰 예산 초과 / 메시지 상한 / API 오류 / 합의 반려 후 재제출 / no_quorum /
-  투표 중 기권 / idle) 포함 — "실패 경로가 제품이다".
+  (토큰 예산 초과 / 메시지 상한 / API 오류 / 합의 반려 후 재제출 시 version 증가 /
+  이전 proposal에 대한 늦은 투표 무시 / voting 중 중복 submit_result 거부 /
+  심의자 사망 시 정족수 재계산 / no_quorum / 투표 중 기권 / voting 중에도 예산 강제 /
+  idle 판정과 voting timeout의 레이스 없음 / 세션 종료 후 추가 메시지·투표 거부)
+  포함 — "실패 경로가 제품이다".
 
-### M3 — 서버
+### M3 — 서버 + 영속화
 - REST: `POST /sessions`(태스크 제출), `GET /sessions/{id}`, `POST /sessions/{id}/cancel`,
   `GET /teams`(팀 설정 목록).
 - SSE: `GET /sessions/{id}/events` — 메시지/상태/사용량 이벤트 실시간 스트림.
-- **완료 기준**: curl 기반 통합 스모크. 요청 경로에 블로킹 I/O 없음 확인.
+- `eventstore.py` (D-017): 저장 인터페이스 + SQLite 구현 (ORM/이벤트 소싱 프레임워크
+  금지). 테이블: sessions / messages / proposals / votes / decisions / usage_events.
+  화백의 핵심 산출물은 최종 답변만이 아니라 **결정 과정과 근거**다 — 완료된 세션과
+  의결 기록은 서버 재시작 후에도 조회 가능해야 한다(실행 중 세션 완전 복원은 M5).
+  쓰기는 write-behind로 요청 경로 블로킹 금지.
+- **완료 기준**: curl 기반 통합 스모크 + 재시작 후 완료 세션 조회 확인.
+  요청 경로에 블로킹 I/O 없음 확인.
 
 ### M4 — 웹 대시보드
 - 화면: 태스크 제출, 세션 목록, 세션 상세(에이전트별 레인 + 메시지 타임라인, 상태/사용량).
@@ -150,4 +177,7 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 - ChatGPT subscription 연동(Sign in with ChatGPT OAuth) 실현 가능성 — M2 착수 전 스파이크
 - 기본 팀 구성 — 초안 제시됨(`configs/team.default.yaml`: researcher/analyst/writer,
   unanimous) — **사용자 확인 대기**
+- Hermes(외부 Agent Runtime/Worker 프레임워크) — 미도입 확정(D-015). 장기 실행
+  작업자(웹 조사/코드 수정 등)가 필요해질 때 외부 Runtime/Worker Adapter로만
+  후순위 실험 검토. Hermes 전용 타입을 코어 계약에 노출하지 않는다.
 - 에이전트에게 부여할 작업 도구 범위 (초기: 텍스트 협업만 / 추후: 웹 검색, 코드 실행 등 서버 도구)

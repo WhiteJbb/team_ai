@@ -73,9 +73,20 @@ class FailReason(str, enum.Enum):
 
 
 class ApprovalPolicy(str, enum.Enum):
-    UNANIMOUS = "unanimous"  # 제출자 제외 전원 승인 (기본 — 화백)
-    MAJORITY = "majority"    # 유효 투표 과반 승인, 동수는 반려
-    FIRST = "first"          # 투표 생략, 첫 제출 즉시 확정
+    """합의 정족수 정책 (D-016). voters는 항상 '생존한 심의 대상자(제출자 제외)'.
+
+    - UNANIMOUS: 생존 심의자 전원이 approve해야 확정 (기본 — 엄밀한 화백).
+      미투표(만료 기권)는 승인으로 간주하지 않는다 → 기권 존재 시 no_quorum.
+    - MAJORITY: 생존 심의자 '전체'의 과반이 approve해야 확정 (유효 투표 과반 아님).
+    - PARTICIPATING_UNANIMOUS: 실제 유효 투표를 한 에이전트 전원이 approve하면 확정
+      (기권 제외 판정 — 구 D-011의 unanimous 규칙이 이 정책으로 이동).
+    - FIRST: 투표 생략, 첫 제출 즉시 확정.
+    """
+
+    UNANIMOUS = "unanimous"
+    MAJORITY = "majority"
+    PARTICIPATING_UNANIMOUS = "participating_unanimous"
+    FIRST = "first"
 
 
 class AgentState(str, enum.Enum):
@@ -155,11 +166,13 @@ class Usage:
 class Message:
     """버스에 실리는 단일 메시지. created_at은 버스가 ISO 8601(UTC)로 찍는다.
 
-    타입별 규칙 (Plan "코어 의미론" §5):
+    타입별 규칙 (Plan "코어 의미론" §5, D-016):
     - CHAT: vote/proposal_id 금지. 수신자는 특정 에이전트(들) 또는 브로드캐스트.
-    - RESULT_PROPOSAL: 브로드캐스트 강제(전원 심의). content가 결과 초안.
+    - RESULT_PROPOSAL: 브로드캐스트 강제(전원 심의). content가 결과 초안이며
+      proposal_id는 대응하는 ResultProposal.id (버전 추적).
     - VOTE: vote/proposal_id 필수, 브로드캐스트 강제(투표 공개 — 화백).
-      content는 투표 사유(반려 사유 전달에 사용).
+      content는 투표 사유(반려 사유 전달에 사용). 이전 제안에 대한 늦은 투표는
+      엔진이 proposal_id 불일치로 무시한다.
     """
 
     id: str
@@ -192,8 +205,11 @@ class Message:
                 raise ContractError("result proposal content must be non-empty")
             if self.recipients != (BROADCAST,):
                 raise ContractError("result proposal must be broadcast to all agents")
-            if self.vote is not None or self.proposal_id is not None:
-                raise ContractError("result proposal must not carry vote or proposal_id")
+            if self.vote is not None:
+                raise ContractError("result proposal must not carry a vote")
+            # 제안 버전 추적(D-016): 메시지는 자신이 실어 나르는 ResultProposal.id를 가리킨다.
+            if not self.proposal_id:
+                raise ContractError("result proposal requires proposal_id")
         elif self.type is MessageType.VOTE:
             if self.vote is None or not self.proposal_id:
                 raise ContractError("vote message requires vote and proposal_id")
@@ -311,14 +327,50 @@ class TeamConfig:
 
 
 # ---------------------------------------------------------------------------
-# 화백 합의 — 투표 집계 (순수 함수, 세션 엔진이 재사용)
+# 화백 합의 — 결과 제안과 투표 집계 (순수 함수, 세션 엔진이 재사용)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class VoteTally:
-    """초안 1건에 대한 투표 현황. voters는 제출자를 제외한 심의 대상 전원.
+class ResultProposal:
+    """결과 제안 1건의 도메인 레코드 (D-016).
 
-    기권(abstained)은 idle_timeout 내 무투표를 엔진이 기권 처리한 것 (D-011).
+    반려 후 재제출은 version을 올린 새 제안으로 표현한다 — 투표는 반드시
+    proposal_id로 대상 제안을 가리키며, 이전 제안에 대한 늦은 투표는 현재
+    제안에 반영하지 않는다(엔진 규칙). running 상태에서만 새 제안을 만들 수
+    있고, voting 중 추가 제안은 도메인 오류다(엔진이 강제).
+    """
+
+    id: str
+    session_id: str
+    proposer: str
+    version: int
+    content: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        for name in ("id", "session_id", "proposer", "content", "created_at"):
+            if not getattr(self, name):
+                raise ContractError(f"ResultProposal.{name} must be non-empty")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) \
+                or self.version < 1:
+            raise ContractError("ResultProposal.version must be a positive int")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ResultProposal":
+        return cls(**data)
+
+
+@dataclass(frozen=True)
+class VoteTally:
+    """제안 1건에 대한 투표 현황. voters는 제안 생성 시점의 '생존' 심의 대상
+    (제출자 제외) 전원이며, 심의 중 사망한 에이전트는 with_voter_removed로
+    제외해 정족수를 재계산한다 (D-016).
+
+    기권(abstained)은 투표 시간 만료까지의 무투표를 엔진이 기권 처리한 것 —
+    어떤 정책에서도 기권을 암묵적 승인으로 간주하지 않는다.
     """
 
     voters: frozenset[str]
@@ -353,19 +405,41 @@ class VoteTally:
         responded = self.approvals | self.rejections | self.abstained
         return replace(self, abstained=self.abstained | (agents & self.voters - responded))
 
+    def with_voter_removed(self, agent: str) -> "VoteTally":
+        """심의 중 사망한 에이전트를 심의 대상에서 제외한다 — 정족수 재계산 (D-016).
+
+        모든 응답 그룹에서도 함께 제거한다(사망자의 기존 투표는 무효).
+        """
+        if agent not in self.voters:
+            raise ContractError(f"agent {agent!r} is not a voter for this proposal")
+        removed = frozenset({agent})
+        return VoteTally(
+            voters=self.voters - removed,
+            approvals=self.approvals - removed,
+            rejections=self.rejections - removed,
+            abstained=self.abstained - removed,
+        )
+
     @property
     def pending(self) -> frozenset[str]:
         return self.voters - self.approvals - self.rejections - self.abstained
 
     def decide(self, policy: ApprovalPolicy) -> ProposalOutcome:
-        """정족수 판정 (D-011). 조기 확정 가능하면 PENDING을 기다리지 않는다.
+        """정족수 판정 (D-016). 결과가 이미 확정 가능하면 PENDING을 기다리지 않는다.
 
+        공통 규칙:
         - FIRST: 심의 생략, 즉시 확정.
-        - voters가 비면(1인 팀) 심의자가 없으므로 즉시 확정.
-        - UNANIMOUS: 반대 1표면 즉시 반려. 전원 응답 후 승인 1표 이상이면 확정
-          (기권 제외 전원 승인), 전원 기권이면 NO_QUORUM.
-        - MAJORITY: 승인이 과반이면 즉시 확정, 반대가 절반 이상이면 즉시 반려
-          (동수는 반려). 전원 응답 후 유효 투표가 없으면 NO_QUORUM.
+        - voters가 비면(1인 팀 / 심의자 전원 사망) 심의자가 없으므로 즉시 확정.
+        - 기권은 어떤 정책에서도 암묵적 승인이 아니다.
+
+        정책별 규칙:
+        - UNANIMOUS: 반대 1표면 즉시 반려. 생존 심의자 '전원' approve여야 확정 —
+          기권(만료 미투표)이 하나라도 있으면 확정 불가 → 전원 응답 시 NO_QUORUM.
+        - MAJORITY: 생존 심의자 '전체'의 과반 approve로 확정(조기 확정 가능).
+          남은 미응답을 전부 approve로 가정해도 과반이 불가능해지면 조기 종료 —
+          반대표가 있으면 REJECTED, 기권만으로 불가능해졌으면 NO_QUORUM.
+        - PARTICIPATING_UNANIMOUS: 반대 1표면 즉시 반려. 전원 응답 후 유효 투표
+          (approve/reject)를 한 전원이 approve면 확정, 유효 투표가 없으면 NO_QUORUM.
         """
         if policy is ApprovalPolicy.FIRST or not self.voters:
             return ProposalOutcome.APPROVED
@@ -376,24 +450,32 @@ class VoteTally:
         if policy is ApprovalPolicy.UNANIMOUS:
             if self.rejections:
                 return ProposalOutcome.REJECTED
+            if self.approvals == self.voters:
+                return ProposalOutcome.APPROVED
             if all_responded:
+                # 반대는 없지만 기권이 존재 — 전원 승인 실패.
+                return ProposalOutcome.NO_QUORUM
+            return ProposalOutcome.PENDING
+
+        if policy is ApprovalPolicy.MAJORITY:
+            if len(self.approvals) * 2 > n:
+                return ProposalOutcome.APPROVED
+            # 남은 미응답이 전부 approve해도 과반 불가 → 조기 종료.
+            if (len(self.approvals) + len(self.pending)) * 2 <= n:
                 return (
-                    ProposalOutcome.APPROVED if self.approvals
+                    ProposalOutcome.REJECTED if self.rejections
                     else ProposalOutcome.NO_QUORUM
                 )
             return ProposalOutcome.PENDING
 
-        # MAJORITY
-        if len(self.approvals) * 2 > n:
-            return ProposalOutcome.APPROVED
-        if len(self.rejections) * 2 >= n:
+        # PARTICIPATING_UNANIMOUS
+        if self.rejections:
             return ProposalOutcome.REJECTED
         if all_responded:
-            if not self.approvals and not self.rejections:
-                return ProposalOutcome.NO_QUORUM
-            if len(self.approvals) > len(self.rejections):
-                return ProposalOutcome.APPROVED
-            return ProposalOutcome.REJECTED
+            return (
+                ProposalOutcome.APPROVED if self.approvals
+                else ProposalOutcome.NO_QUORUM
+            )
         return ProposalOutcome.PENDING
 
 

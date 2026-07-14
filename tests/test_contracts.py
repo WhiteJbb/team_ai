@@ -19,6 +19,7 @@ from hwabaek.contracts import (
     Message,
     MessageType,
     ProposalOutcome,
+    ResultProposal,
     Session,
     SessionStatus,
     TeamConfig,
@@ -184,9 +185,11 @@ class TestMessageChat(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _proposal(**overrides) -> Message:
+    # RESULT_PROPOSAL은 자신이 실어 나르는 ResultProposal.id를 proposal_id로 가리킨다 (D-016).
     base = dict(
         id="m2", session_id="s1", sender="writer", recipients=(BROADCAST,),
         type=MessageType.RESULT_PROPOSAL, content="draft result", created_at=TS,
+        proposal_id="p1",
     )
     base.update(overrides)
     return Message(**base)
@@ -207,12 +210,21 @@ class TestMessageResultProposal(unittest.TestCase):
         with self.assertRaises(ContractError):
             _proposal(recipients=("writer",))
 
-    def test_forbids_vote_and_proposal_id(self) -> None:
-        # 초안은 vote/proposal_id 금지.
+    def test_forbids_vote(self) -> None:
+        # 초안은 여전히 vote 금지(제출은 투표가 아님).
         with self.assertRaises(ContractError):
             _proposal(vote=VoteDecision.APPROVE)
+
+    def test_requires_proposal_id(self) -> None:
+        # D-016: 초안은 이제 proposal_id 필수(자기 ResultProposal.id) — None/빈 문자열 거부.
         with self.assertRaises(ContractError):
-            _proposal(proposal_id="p1")
+            _proposal(proposal_id=None)
+        with self.assertRaises(ContractError):
+            _proposal(proposal_id="")
+
+    def test_carries_proposal_id(self) -> None:
+        # 유효한 proposal_id는 그대로 보존된다.
+        self.assertEqual(_proposal(proposal_id="p7").proposal_id, "p7")
 
 
 # ---------------------------------------------------------------------------
@@ -505,8 +517,58 @@ class TestVoteTallyWithAbstained(unittest.TestCase):
         self.assertEqual(t.abstained, frozenset({"a"}))
 
 
+class TestVoteTallyWithVoterRemoved(unittest.TestCase):
+    # D-016: 심의 중 사망한 에이전트를 voters와 모든 응답 그룹에서 제거해 정족수를 재계산한다.
+    P = ApprovalPolicy.UNANIMOUS
+
+    def test_removes_from_voters_and_response_groups(self) -> None:
+        # 사망자는 voters·approvals·rejections·abstained 어디에서도 사라진다.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a"}), rejections=frozenset({"b"}))
+        t = t.with_voter_removed("b")
+        self.assertEqual(t.voters, frozenset({"a", "c"}))
+        self.assertEqual(t.approvals, frozenset({"a"}))
+        self.assertEqual(t.rejections, frozenset())
+
+    def test_pending_voter_death_finalizes_unanimous(self) -> None:
+        # 미투표자가 사망 제거되면 남은 전원이 승인 상태 → unanimous 확정.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a", "b"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.PENDING)
+        t = t.with_voter_removed("c")  # 미투표자 c 사망
+        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+
+    def test_removing_rejecter_flips_outcome(self) -> None:
+        # 사망자의 기존 reject가 제거되어 REJECTED → APPROVED로 판정이 바뀐다.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a", "b"}), rejections=frozenset({"c"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
+        t = t.with_voter_removed("c")  # 반대자 c 사망 → 반대 무효화
+        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+
+    def test_removing_non_voter_raises(self) -> None:
+        # 비심의자 제거는 계약 위반.
+        t = VoteTally(voters=frozenset({"a", "b"}), approvals=frozenset({"a"}))
+        with self.assertRaises(ContractError):
+            t.with_voter_removed("x")
+
+    def test_removing_all_voters_leaves_empty_and_approves(self) -> None:
+        # 심의자를 모두 제거하면 voters 빈 집합 → 심의자 없음 → 즉시 확정.
+        t = VoteTally(voters=frozenset({"a"}), approvals=frozenset({"a"}))
+        t = t.with_voter_removed("a")
+        self.assertEqual(t.voters, frozenset())
+        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+
+    def test_returns_new_instance(self) -> None:
+        # 불변 — 원본 tally는 그대로.
+        t = VoteTally(voters=frozenset({"a", "b"}), rejections=frozenset({"b"}))
+        t2 = t.with_voter_removed("b")
+        self.assertEqual(t.voters, frozenset({"a", "b"}))
+        self.assertIsNot(t, t2)
+
+
 # ---------------------------------------------------------------------------
-# VoteTally.decide — 화백 합의 정족수 판정 (D-011, 가장 중요)
+# VoteTally.decide — 화백 합의 정족수 판정 (D-016, 가장 중요)
 # ---------------------------------------------------------------------------
 
 class TestDecideFirstAndEmpty(unittest.TestCase):
@@ -524,6 +586,8 @@ class TestDecideFirstAndEmpty(unittest.TestCase):
 
 
 class TestDecideUnanimous(unittest.TestCase):
+    # D-016 UNANIMOUS: 생존 심의자 '전원' approve여야 확정. 반대 1표 즉시 반려.
+    # 기권은 승인이 아니므로 전원 응답이라도 기권이 있으면 NO_QUORUM.
     P = ApprovalPolicy.UNANIMOUS
 
     def test_single_reject_immediately_rejected(self) -> None:
@@ -532,21 +596,30 @@ class TestDecideUnanimous(unittest.TestCase):
         self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
 
     def test_partial_approvals_pending(self) -> None:
-        # 일부만 승인, 미응답 존재 → PENDING.
+        # 일부만 승인, 미응답 존재 → 아직 미완 → PENDING.
         t = VoteTally(voters=frozenset({"a", "b", "c"}), approvals=frozenset({"a"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.PENDING)
 
     def test_all_approve_approved(self) -> None:
-        # 전원 승인 → 확정.
+        # 생존 심의자 전원 승인 → 확정.
         t = VoteTally(voters=frozenset({"a", "b"}),
                       approvals=frozenset({"a", "b"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
 
-    def test_approve_plus_abstain_approved(self) -> None:
-        # 승인+기권 혼합(기권 제외 전원 승인, 반대 0) → 확정.
+    def test_approve_plus_abstain_is_not_approved(self) -> None:
+        # D-016 핵심: 승인+기권 혼합은 APPROVED가 '아니다'. 전원 응답이지만
+        # 기권이 남아 전원 승인 실패 → NO_QUORUM (구 unanimous와 달라진 지점).
         t = VoteTally(voters=frozenset({"a", "b", "c"}),
                       approvals=frozenset({"a"}), abstained=frozenset({"b", "c"}))
-        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+        outcome = t.decide(self.P)
+        self.assertNotEqual(outcome, ProposalOutcome.APPROVED)
+        self.assertEqual(outcome, ProposalOutcome.NO_QUORUM)
+
+    def test_all_responded_with_abstain_no_quorum(self) -> None:
+        # 반대 0, 승인 다수지만 기권 1명으로 전원 응답 → 기권 존재로 NO_QUORUM.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a", "b"}), abstained=frozenset({"c"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.NO_QUORUM)
 
     def test_all_abstain_no_quorum(self) -> None:
         # 전원 기권 → 유효 투표 0 → NO_QUORUM.
@@ -555,34 +628,91 @@ class TestDecideUnanimous(unittest.TestCase):
         self.assertEqual(t.decide(self.P), ProposalOutcome.NO_QUORUM)
 
 
+class TestDecideParticipatingUnanimous(unittest.TestCase):
+    # D-016 PARTICIPATING_UNANIMOUS: 유효 투표(approve/reject)를 한 전원이 approve면 확정
+    # (기권 제외 판정 — 구 unanimous 규칙). 반대 1표 즉시 반려, 유효 투표 0이면 NO_QUORUM.
+    P = ApprovalPolicy.PARTICIPATING_UNANIMOUS
+
+    def test_single_reject_immediately_rejected(self) -> None:
+        # 반대 1표면 즉시 반려.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}), rejections=frozenset({"a"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
+
+    def test_partial_approvals_pending(self) -> None:
+        # 미응답 존재 → PENDING.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}), approvals=frozenset({"a"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.PENDING)
+
+    def test_all_approve_approved(self) -> None:
+        # 유효 투표 전원 승인 → 확정.
+        t = VoteTally(voters=frozenset({"a", "b"}),
+                      approvals=frozenset({"a", "b"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+
+    def test_approve_plus_abstain_approved(self) -> None:
+        # 승인+기권 혼합: 기권을 제외한 유효 투표 전원이 승인 → 확정.
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a"}), abstained=frozenset({"b", "c"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+
+    def test_all_abstain_no_quorum(self) -> None:
+        # 유효 투표 0(전원 기권) → NO_QUORUM.
+        t = VoteTally(voters=frozenset({"a", "b"}),
+                      abstained=frozenset({"a", "b"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.NO_QUORUM)
+
+
+class TestDecideUnanimousVsParticipating(unittest.TestCase):
+    # 동일한 tally(승인+기권 혼합, 반대 0, 전원 응답)에 두 정책을 적용해 차이를 대비한다.
+    # UNANIMOUS는 기권을 승인 실패로 보아 NO_QUORUM, PARTICIPATING_UNANIMOUS는
+    # 기권을 제외한 유효 투표 전원 승인이므로 APPROVED.
+    def test_same_tally_diverges(self) -> None:
+        tally = VoteTally(voters=frozenset({"a", "b", "c"}),
+                          approvals=frozenset({"a"}), abstained=frozenset({"b", "c"}))
+        self.assertEqual(tally.decide(ApprovalPolicy.UNANIMOUS),
+                         ProposalOutcome.NO_QUORUM)
+        self.assertEqual(tally.decide(ApprovalPolicy.PARTICIPATING_UNANIMOUS),
+                         ProposalOutcome.APPROVED)
+
+
 class TestDecideMajority(unittest.TestCase):
+    # D-016 MAJORITY: 생존 심의자 '전체'의 과반 approve로 확정(유효 투표 과반이 아님).
+    # 남은 미응답을 전부 approve로 가정해도 과반 불가면 조기 종료 —
+    # 반대표가 있으면 REJECTED, 기권만으로 불가하면 NO_QUORUM.
     P = ApprovalPolicy.MAJORITY
 
-    def test_majority_approve_early(self) -> None:
-        # 과반 승인 → 미완이라도 조기 확정 (n=3, 승인 2).
+    def test_whole_majority_approve_early(self) -> None:
+        # 전체 과반 승인 → 미완이라도 조기 확정 (n=3, 승인 2).
         t = VoteTally(voters=frozenset({"a", "b", "c"}),
                       approvals=frozenset({"a", "b"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
 
-    def test_half_reject_early(self) -> None:
-        # 절반 이상 반대 → 조기 반려 (n=4, 반대 2).
-        t = VoteTally(voters=frozenset({"a", "b", "c", "d"}),
+    def test_majority_reject_early(self) -> None:
+        # 반대가 과반 → 남은 미응답이 모두 승인해도 과반 불가 → 조기 반려 (n=3, 반대 2).
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
                       rejections=frozenset({"a", "b"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
 
     def test_tie_completed_rejected(self) -> None:
-        # 동수(1-1) + 기권으로 전원 응답 완료 → 반려.
+        # 동수(전원 응답, 2-2) → 승인이 전체 과반에 미달 + 반대 존재 → 반려.
         t = VoteTally(voters=frozenset({"a", "b", "c", "d"}),
-                      approvals=frozenset({"a"}), rejections=frozenset({"b"}),
-                      abstained=frozenset({"c", "d"}))
+                      approvals=frozenset({"a", "b"}), rejections=frozenset({"c", "d"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
 
-    def test_completed_approvals_beat_rejections(self) -> None:
-        # 전원 응답 완료, 조기 과반은 아니지만 승인 > 반대 → 확정 (n=5, 2승인 1반대 2기권).
+    def test_plurality_without_whole_majority_rejected(self) -> None:
+        # D-016 핵심: 승인 > 반대여도 '전체' 과반에 못 미치면 확정되지 않는다.
+        # 반대표가 있으므로 REJECTED (n=5, 2승인 1반대 2기권 — 승인 2는 과반 3 미달).
         t = VoteTally(voters=frozenset({"a", "b", "c", "d", "e"}),
                       approvals=frozenset({"a", "b"}), rejections=frozenset({"c"}),
                       abstained=frozenset({"d", "e"}))
-        self.assertEqual(t.decide(self.P), ProposalOutcome.APPROVED)
+        self.assertEqual(t.decide(self.P), ProposalOutcome.REJECTED)
+
+    def test_abstentions_block_majority_no_quorum(self) -> None:
+        # 반대는 없지만 기권으로 전체 과반이 불가능해짐 → NO_QUORUM
+        # (n=3, 승인 1 + 기권 2 — 승인 1은 과반 2 미달, 반대 없음).
+        t = VoteTally(voters=frozenset({"a", "b", "c"}),
+                      approvals=frozenset({"a"}), abstained=frozenset({"b", "c"}))
+        self.assertEqual(t.decide(self.P), ProposalOutcome.NO_QUORUM)
 
     def test_all_abstain_no_quorum(self) -> None:
         # 유효 투표 0(전원 기권) → NO_QUORUM.
@@ -591,9 +721,66 @@ class TestDecideMajority(unittest.TestCase):
         self.assertEqual(t.decide(self.P), ProposalOutcome.NO_QUORUM)
 
     def test_incomplete_pending(self) -> None:
-        # 미완(과반/절반반대 모두 미달) → PENDING (n=3, 승인 1).
+        # 아직 과반도 반려도 불가능(미응답이 승인하면 과반 가능) → PENDING (n=3, 승인 1 미응답 2).
         t = VoteTally(voters=frozenset({"a", "b", "c"}), approvals=frozenset({"a"}))
         self.assertEqual(t.decide(self.P), ProposalOutcome.PENDING)
+
+
+# ---------------------------------------------------------------------------
+# ResultProposal — 결과 제안 도메인 레코드 (D-016)
+# ---------------------------------------------------------------------------
+
+def _result_proposal(**overrides) -> ResultProposal:
+    base = dict(
+        id="p1", session_id="s1", proposer="writer", version=1,
+        content="draft result", created_at=TS,
+    )
+    base.update(overrides)
+    return ResultProposal(**base)
+
+
+class TestResultProposal(unittest.TestCase):
+    def test_valid(self) -> None:
+        p = _result_proposal()
+        self.assertEqual(p.id, "p1")
+        self.assertEqual(p.version, 1)
+
+    def test_rejects_empty_required_fields(self) -> None:
+        # id/session_id/proposer/content/created_at 빈 값 거부.
+        for field in ("id", "session_id", "proposer", "content", "created_at"):
+            with self.subTest(field=field):
+                with self.assertRaises(ContractError):
+                    _result_proposal(**{field: ""})
+
+    def test_rejects_non_positive_version(self) -> None:
+        # version은 양의 int — 0/음수 거부.
+        for bad in (0, -1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ContractError):
+                    _result_proposal(version=bad)
+
+    def test_rejects_bool_version(self) -> None:
+        # bool은 int의 서브클래스지만 version으로는 거부.
+        with self.assertRaises(ContractError):
+            _result_proposal(version=True)
+
+    def test_rejects_non_int_version(self) -> None:
+        # float 등 비정수 version 거부.
+        with self.assertRaises(ContractError):
+            _result_proposal(version=1.5)
+
+    def test_allows_higher_version(self) -> None:
+        # 반려 후 재제출은 version을 올린 새 제안 — 2 이상도 허용.
+        self.assertEqual(_result_proposal(version=3).version, 3)
+
+    def test_to_from_dict_roundtrip(self) -> None:
+        # to_dict/from_dict 왕복 동일성.
+        p = _result_proposal(version=2, content="revised draft")
+        self.assertEqual(ResultProposal.from_dict(p.to_dict()), p)
+        self.assertEqual(p.to_dict(), {
+            "id": "p1", "session_id": "s1", "proposer": "writer",
+            "version": 2, "content": "revised draft", "created_at": TS,
+        })
 
 
 # ---------------------------------------------------------------------------

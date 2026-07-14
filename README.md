@@ -25,8 +25,9 @@
    `send_message` 도구로 서로 메시지를 주고받으며 협업합니다.
 3. 협업 과정은 대시보드의 메시지 타임라인에 실시간(SSE)으로 표시됩니다.
 4. 어느 에이전트가 `submit_result`로 초안을 제출하면 다른 에이전트들이 승인/반대를
-   투표합니다(**화백 합의** — 기본 만장일치). 승인되면 최종 결과와 함께 세션이 종료되고,
-   반려되면 사유와 함께 논의가 재개됩니다.
+   투표합니다(**화백 합의** — 기본은 생존 심의자 전원 승인의 엄밀한 만장일치, 미투표는
+   승인으로 치지 않음). 승인되면 최종 결과와 함께 세션이 종료되고, 반려되면 사유와
+   함께 논의가 재개됩니다(재제출은 버전이 오른 새 제안).
 
 ### 종료 안전장치
 
@@ -57,7 +58,7 @@ termination:             # 종료 정책 (전부 선택)
   max_messages: 100      # 세션 메시지 상한
   token_budget: 200000   # 세션 토큰 예산
   idle_timeout: 30       # 전원 유휴 판정 시간(초)
-  approval: unanimous    # 화백 합의 정족수: unanimous | majority | first
+  approval: unanimous    # 정족수: unanimous | majority | participating_unanimous | first
 agents:                  # 1명 이상
   - name: researcher     # 필수
     role: ...            # 필수 — 대시보드 표시용

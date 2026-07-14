@@ -51,14 +51,14 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | `content` | string | 본문(`vote`는 투표 사유). |
 | `created_at` | string | 버스 시각. envelope `at`과 동일 값. |
 | `vote` | string\|null | `VoteDecision`: `approve`\|`reject`. `chat`/`result_proposal`은 항상 `null`. |
-| `proposal_id` | string\|null | `vote` 타입 필수, 그 외 항상 `null`. |
+| `proposal_id` | string\|null | `vote`/`result_proposal` 필수(대상/자기 `ResultProposal.id` — 제안 버전 추적, D-016), `chat`은 항상 `null`. |
 
 ```json
 {"seq": 13, "session_id": "sess_8f3a1c", "type": "message", "at": "2026-07-14T09:15:23.500Z",
  "payload": {"id": "msg_0091", "session_id": "sess_8f3a1c", "sender": "analyst",
  "recipients": ["*"], "type": "result_proposal",
  "content": "Draft summary: quarterly revenue rose 8% YoY.",
- "created_at": "2026-07-14T09:15:23.500Z", "vote": null, "proposal_id": null}}
+ "created_at": "2026-07-14T09:15:23.500Z", "vote": null, "proposal_id": "prop_7"}}
 ```
 
 ### 3.3 `agent_state` (`make_agent_state_event`) — 에이전트 상태 변화 시 발행
@@ -134,8 +134,8 @@ payload는 `Message.to_dict()`와 동일 스키마.
 |---|---|---|
 | 세션 생성(초기 `running`) | `session_status` | 초기 seq 부여는 서버(M3) 구현 사항. |
 | `send_message` chat 발신 | `message` | |
-| `submit_result` 호출 | `message`(`result_proposal`) + `session_status`(`voting`) | `running→voting`. |
-| `vote_result` 호출 | `message`(`vote`) + `vote_status` | 투표는 브로드캐스트 메시지로도 남음(화백 원칙). |
+| `submit_result` 호출 (running에서만) | `message`(`result_proposal`) + `session_status`(`voting`) | `running→voting`. 반려 후 재제출은 version이 오른 새 제안(D-016). voting 중 중복 submit은 거부되어 이벤트 없음. |
+| `vote_result` 호출 | `message`(`vote`) + `vote_status` | 투표는 브로드캐스트 메시지로도 남음(화백 원칙). 이전 제안에 대한 늦은 투표는 무시되어 `vote_status` 미발행. |
 | 무응답 기권 처리 | `vote_status` | 메시지 이벤트 없음 — 엔진 내부 처리(D-011). |
 | 합의 승인 | `vote_status`(최종) + `session_status`(`completed`) + `result` | `voting→completed`. |
 | 합의 반려 | `vote_status`(최종) + `session_status`(`running`) | 사유는 이미 `vote` 메시지 content로 전달됨. |

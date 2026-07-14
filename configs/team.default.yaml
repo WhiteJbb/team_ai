@@ -24,7 +24,9 @@ termination:
   token_budget: 200000
   # 전원이 이 시간(초) 동안 유휴(인박스 비어있고 LLM 호출도 없음)면 idle 판정.
   idle_timeout: 30
-  # 화백 합의 정족수 정책 — unanimous: 제출자를 제외한 전원 승인 필요(기본, 화백 원칙).
+  # 화백 합의 정족수 정책 (D-016) — unanimous: 생존 심의자(제출자 제외) 전원 승인,
+  # 미투표는 승인 아님(기본, 엄밀한 화백 원칙). 그 외: majority(생존 전체의 과반) /
+  # participating_unanimous(유효 투표자 전원) / first(투표 생략).
   approval: unanimous
 
 # 팀을 구성하는 에이전트 목록. 각 에이전트는 name/role/system_prompt가 필수이며
