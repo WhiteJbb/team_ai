@@ -45,4 +45,21 @@ SC-01 홈/제출 ──제출──> SC-03 세션 상세 (실시간 관찰)
 ## 내비게이션
 
 - 상단 고정 내비: 홈(제출) / 세션 / 팀
-- 세션 상세는 URL로 직접 접근 가능 (`/sessions/{id}`) — 새로고침 시 히스토리 복원(REST) 후 SSE 재구독
+- 세션 상세는 브라우저에서 직접 링크 가능해야 한다. M4 UI URL은 JSON API
+  (`/sessions/{id}`)와 충돌하지 않는 별도 namespace로 정하고, 새로고침 시 REST
+  스냅샷 복원 후 SSE 전체 backlog를 재구독한다.
+
+## M3 서버 데이터 연결
+
+| 화면 | REST/SSE 연결 |
+|---|---|
+| SC-01 홈 / 태스크 제출 | `POST /sessions`, 최근 세션은 `GET /sessions?limit=5` |
+| SC-02 세션 목록 | `GET /sessions` |
+| SC-03 세션 상세 | `GET /sessions/{id}` 후 `GET /sessions/{id}/events` 구독, 취소는 `POST /sessions/{id}/cancel` |
+| SC-04 팀 설정 | `GET /teams` |
+
+- `GET /sessions/{id}`는 세션 스냅샷과 메시지·제안·투표 이력을 복원한다.
+- SSE 최초 구독은 헤더 없이 전체 이벤트 backlog를 받은 뒤 라이브 이벤트로 이어진다.
+  재연결할 때는 마지막으로 적용한 이벤트의 `sequence`를 `Last-Event-ID`에 넣고,
+  서버가 그보다 큰 sequence부터 재전송한다.
+- 종료 세션의 SSE는 저장된 backlog 전송 후 닫힌다. 없는 세션은 REST와 SSE 모두 404다.

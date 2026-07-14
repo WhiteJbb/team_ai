@@ -10,6 +10,8 @@ interrupted 처리)를 명시적으로 검증한다.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import tempfile
 import time
 import unittest
@@ -21,13 +23,16 @@ from hwabaek.contracts import (
     AgentSpec,
     ApprovalConfig,
     ApprovalPolicy,
+    EventType,
     Session,
     SessionStatus,
     TeamConfig,
     TerminationPolicy,
+    make_session_status_event,
 )
 from hwabaek.llm.fake import text_response, tool_response
 from hwabaek.server import create_app
+from hwabaek.serve import create_parser
 
 CLOCK = "2026-07-14T00:00:00Z"
 
@@ -257,6 +262,9 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(
                 client.post("/sessions", json={"task": ""}).status_code, 422
             )
+            self.assertEqual(
+                client.post("/sessions", json={"task": "   "}).status_code, 422
+            )
 
     # -----------------------------------------------------------------------
     # 7) 알 수 없는 팀 이름 400
@@ -265,6 +273,13 @@ class ServerApiTest(unittest.TestCase):
         # team_override 없이 실 configs를 쓰되, 존재하지 않는 팀 이름을 요청.
         app = self._app(store=self._store())
         with TestClient(app) as client:
+            r = client.post("/sessions", json={"task": "t", "team": "no_such_team"})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("unknown team", r.json()["detail"])
+
+        # fake/team_override에서도 명시한 잘못된 팀을 조용히 대체하지 않는다.
+        fake_app = self._app(store=self._store(), team_override=_first_team())
+        with TestClient(fake_app) as client:
             r = client.post("/sessions", json={"task": "t", "team": "no_such_team"})
             self.assertEqual(r.status_code, 400)
             self.assertIn("unknown team", r.json()["detail"])
@@ -293,6 +308,9 @@ class ServerApiTest(unittest.TestCase):
         seed_store = self._store()
         old = Session(id="old-sess", task="left running", team_name="demo", created_at=CLOCK)
         asyncio.run(seed_store.save_session(old))
+        asyncio.run(seed_store.append_event(
+            make_session_status_event("old-event", 7, old, CLOCK)
+        ))
         asyncio.run(seed_store.close())
 
         app = self._app(store=self._store(), team_override=_first_team())
@@ -303,6 +321,71 @@ class ServerApiTest(unittest.TestCase):
             self.assertEqual(s["status"], "failed")
             self.assertEqual(s["fail_reason"], "interrupted")
             self.assertIsNotNone(s["finished_at"])
+
+        reopened = self._store()
+        events = asyncio.run(reopened.list_events("old-sess"))
+        asyncio.run(reopened.close())
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].type, EventType.SESSION_STATUS)
+        self.assertEqual(events[-1].sequence, 8)
+        self.assertEqual(events[-1].payload["status"], "failed")
+        self.assertEqual(events[-1].payload["fail_reason"], "interrupted")
+
+    # -----------------------------------------------------------------------
+    # 10) 서버 정상 종료는 사용자 취소가 아니라 interrupted
+    # -----------------------------------------------------------------------
+    def test_shutdown_marks_active_session_interrupted(self) -> None:
+        provider, _ = self._blocking_provider()
+        app = self._app(store=self._store(), provider=provider, team_override=_first_team())
+        with TestClient(app) as client:
+            created = client.post("/sessions", json={"task": "keep running"})
+            self.assertEqual(created.status_code, 201)
+            sid = created.json()["id"]
+
+        reopened = self._store()
+        session = asyncio.run(reopened.get_session(sid))
+        events = asyncio.run(reopened.list_events(sid))
+        asyncio.run(reopened.close())
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason.value, "interrupted")
+        self.assertEqual(events[-1].payload["status"], "failed")
+        self.assertEqual(events[-1].payload["fail_reason"], "interrupted")
+
+    # -----------------------------------------------------------------------
+    # 11) LLM 팩토리 조립 실패도 terminal + 정리 후 다음 세션 허용
+    # -----------------------------------------------------------------------
+    def test_llm_factory_failure_is_terminal_and_releases_slot(self) -> None:
+        def provider(team, task):
+            def fail(spec):
+                raise RuntimeError("factory failed")
+            return fail
+
+        app = self._app(store=self._store(), provider=provider, team_override=_first_team())
+        with TestClient(app) as client:
+            first = client.post("/sessions", json={"task": "first"})
+            self.assertEqual(first.status_code, 201)
+            sid = first.json()["id"]
+            detail = self._wait_terminal(client, sid)
+            self.assertEqual(detail["session"]["status"], "failed")
+            self.assertEqual(detail["session"]["fail_reason"], "agent_error")
+
+            deadline = time.time() + 5.0
+            while not app.state.registry.get_runner(sid).done and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(app.state.registry.get_runner(sid).done)
+
+            second = client.post("/sessions", json={"task": "second"})
+            self.assertEqual(second.status_code, 201)
+
+    # -----------------------------------------------------------------------
+    # 12) 충돌하는 영속화 CLI 옵션은 기동 전에 거부
+    # -----------------------------------------------------------------------
+    def test_cli_rejects_db_and_no_db_together(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            create_parser().parse_args(["--db", "records.db", "--no-db"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("not allowed with argument", stderr.getvalue())
 
 
 if __name__ == "__main__":

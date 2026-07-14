@@ -2,6 +2,18 @@
 
 > 마일스톤/PR 완료 전에 점검한다. 항목별로 통과 여부를 확인.
 
+## M3 검증 기록 (2026-07-14)
+
+- [x] 전체 467개 테스트 3회 반복 통과
+- [x] 실제 uvicorn REST/SSE 스모크와 SQLite 재기동 복원 통과
+- [x] 실패 경로: 공백 task, 잘못된 team/Last-Event-ID, 동시 세션, 종료 cancel,
+  팩토리 실패, graceful shutdown, 느린 SSE 소비자 검증
+- [x] 요청 경로 비블로킹 I/O·API 키 비노출·localhost 바인딩 검토
+- [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 검토와 발견 사항 수정
+- [x] README·Plan·IA·EventContract·DecisionLog·WorkLog 정합
+- [x] `feat/m3-server` 브랜치 사용, git 산출물 AI 흔적 없음
+- [ ] PR 생성 및 squash merge
+
 ## 기능/정확성
 
 - [ ] 전체 테스트 통과: `.venv\Scripts\python.exe -m unittest discover -s tests`

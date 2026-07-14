@@ -12,9 +12,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Request, Response, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hwabaek.config import ConfigError
 from hwabaek.contracts import TeamConfig
@@ -27,6 +27,7 @@ from hwabaek.server.events import (
 )
 
 router = APIRouter()
+MAX_EVENT_SEQUENCE = (1 << 63) - 1
 
 
 class CreateSessionRequest(BaseModel):
@@ -34,6 +35,14 @@ class CreateSessionRequest(BaseModel):
 
     task: str = Field(min_length=1, description="task for the team")
     team: str | None = Field(default=None, description="team name (defaults to server default)")
+
+    @field_validator("task")
+    @classmethod
+    def task_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("task must not be blank")
+        return normalized
 
 
 def _registry(request: Request) -> SessionRegistry:
@@ -138,13 +147,22 @@ async def list_teams(request: Request, response: Response) -> dict:
 
 
 def _parse_last_event_id(raw: str | None) -> int:
-    """Last-Event-ID 헤더를 sequence 정수로 파싱한다. 없거나 형식 오류면 -1(처음부터)."""
+    """Last-Event-ID를 0 이상 sequence로 파싱한다. 없으면 -1(처음부터)."""
     if raw is None:
         return -1
     try:
-        return int(raw.strip())
+        value = int(raw.strip())
     except (ValueError, AttributeError):
-        return -1
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Last-Event-ID must be a non-negative integer",
+        ) from None
+    if value < 0 or value > MAX_EVENT_SEQUENCE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Last-Event-ID must be a non-negative integer",
+        )
+    return value
 
 
 @router.get("/sessions/{session_id}/events")

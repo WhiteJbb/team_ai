@@ -21,6 +21,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from hwabaek.config import list_team_configs
 from hwabaek.contracts import (
@@ -30,6 +31,7 @@ from hwabaek.contracts import (
     Session,
     SessionStatus,
     TeamConfig,
+    make_session_status_event,
 )
 from hwabaek.session import SessionManager
 
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from hwabaek.store.base import Store
 
 logger = logging.getLogger(__name__)
+DEFAULT_SUBSCRIBER_QUEUE_SIZE = 512
 
 # (team, task) -> per-agent LLM 팩토리. 실/가짜/스크립트 주입 지점 — 테스트가 실
 # OpenAI 클라이언트를 만들지 않도록 서버 조립이 이 주입을 허용한다.
@@ -104,10 +107,15 @@ class SessionRunner:
     스트림 종료를 알린다.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, subscriber_queue_size: int = DEFAULT_SUBSCRIBER_QUEUE_SIZE
+    ) -> None:
+        if subscriber_queue_size < 1:
+            raise ValueError("subscriber_queue_size must be positive")
         self._manager: SessionManager | None = None
         self._events: list[Event] = []
         self._subscribers: set[asyncio.Queue[Event | None]] = set()
+        self._subscriber_queue_size = subscriber_queue_size
         self._done = asyncio.Event()
         self.task: asyncio.Task | None = None
 
@@ -136,7 +144,14 @@ class SessionRunner:
 
     def on_event(self, event: Event) -> None:
         self._events.append(event)
-        for queue in self._subscribers:
+        for queue in tuple(self._subscribers):
+            if queue.qsize() >= self._subscriber_queue_size:
+                self._subscribers.discard(queue)
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait(None)
+                logger.warning("disconnecting slow SSE subscriber")
+                continue
             queue.put_nowait(event)
 
     def snapshot(self) -> list[Event]:
@@ -144,7 +159,11 @@ class SessionRunner:
         return list(self._events)
 
     def subscribe(self) -> asyncio.Queue[Event | None]:
-        queue: asyncio.Queue[Event | None] = asyncio.Queue()
+        # 논리 상한 + 종료 센티널 1칸. 느린 소비자가 상한을 채우면 on_event가
+        # 연결을 닫고 클라이언트는 마지막 SSE id로 재접속한다.
+        queue: asyncio.Queue[Event | None] = asyncio.Queue(
+            maxsize=self._subscriber_queue_size + 1
+        )
         self._subscribers.add(queue)
         # 이미 종료된 러너에 뒤늦게 구독하면 _run의 센티널 발송을 놓친다 —
         # 스트림이 영원히 대기하지 않도록 이 구독자에게 직접 센티널을 넣는다.
@@ -167,8 +186,11 @@ class SessionRunner:
             await self.manager.run()
         except asyncio.CancelledError:
             raise
-        except Exception:  # 세션 러너의 예외가 서버를 죽이지 않게 격리한다
-            logger.exception("session runner crashed")
+        except Exception as exc:  # 세션 러너의 예외가 서버를 죽이지 않게 격리한다
+            error_type = type(exc).__name__
+            if not error_type.isascii():
+                error_type = "non_ascii_exception"
+            logger.error("session runner crashed (%s)", error_type)
         finally:
             self._done.set()
             # 남아 있는 구독자에게 스트림 종료를 알린다.
@@ -227,6 +249,8 @@ class SessionRegistry:
 
     async def _resolve_team(self, team_name: str | None) -> TeamConfig:
         if self._team_override is not None:
+            if team_name is not None and team_name != self._team_override.name:
+                raise UnknownTeamError(team_name)
             return self._team_override
         wanted = team_name or self._default_team
         teams = await asyncio.to_thread(list_team_configs, self._teams_dir)
@@ -378,12 +402,22 @@ async def mark_interrupted_sessions(
     count = 0
     for status in (SessionStatus.RUNNING, SessionStatus.VOTING):
         for session in await store.list_sessions_by_status(status):
+            created_at = clock()
             interrupted = session.with_status(
                 SessionStatus.FAILED,
                 fail_reason=FailReason.INTERRUPTED,
                 fail_detail="server restarted while the session was active",
-                finished_at=clock(),
+                finished_at=created_at,
+            )
+            events = await store.list_events(session.id)
+            next_sequence = max((event.sequence for event in events), default=-1) + 1
+            event = make_session_status_event(
+                uuid4().hex,
+                next_sequence,
+                interrupted,
+                created_at,
             )
             await store.save_session(interrupted)
+            await store.append_event(event)
             count += 1
     return count

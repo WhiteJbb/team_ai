@@ -236,13 +236,13 @@
 - **결과와 트레이드오프**: 우선순위 표가 계약 문서에 고정됨 — 실제 경쟁 조건에서
   이 순서가 필요한지 M2에서 테스트로 재검증하고, 불필요하면 단순화한다.
 
-## D-022 (2026-07-14) 도메인 이벤트 봉투 확정, 세분 taxonomy는 M2 확정
+## D-022 (2026-07-14) 도메인 이벤트 봉투 확정, 세분 taxonomy는 D-028에서 확정
 
-- **상태**: 봉투 채택 / taxonomy 후보 기록.
+- **상태**: 봉투 채택 / taxonomy는 D-028로 해소.
 - **맥락**: SSE 재연결(Last-Event-ID)과 영속화(session_events)를 위해 이벤트
   식별 체계가 지금 필요하다. 반면 세분 이벤트 타입 목록(session.*, agent.*,
   proposal.*, vote.*, limit.*)의 정확한 발행 지점은 엔진 구현 전에 확정하기 어렵다.
-- **결정**: 봉투를 `event_id / session_id / event_type / sequence / created_at /
+- **결정**: 봉투를 `event_id / session_id / type / sequence / created_at /
   payload`로 지금 확정한다(sequence = 세션 단위 단조 증가, Last-Event-ID 기준).
   내부 도메인 이벤트 세분 taxonomy는 EventContract.md에 **후보로 문서화**하고
   M2 발행 지점 구현과 함께 확정한다 — 봉투 호환은 보장.
@@ -372,7 +372,7 @@
 - **결정**: **6개 집계 타입을 확정 와이어 계약으로 유지**한다. 세분 enum을 새로
   도입하지 않고, 세분 의미(예: proposal.rejected vs approved)는 기존 payload
   필드(session_status의 status/fail_reason, vote_status의 tally, agent_state의
-  state/detail)로 표현한다. EventContract §8의 후보 목록은 "payload로 식별되는
+  state/detail)로 표현한다. EventContract §8의 논리 이벤트 예시는 "payload로 식별되는
   논리적 이벤트"의 참고 매핑으로 남긴다.
 - **대안**: (a) EventType을 ~20종으로 확장 — 대시보드·저장·테스트 계약을 지금
   churn시키고 얻는 것이 payload 중복뿐, (b) 이중 표기(집계 + 세분) — 복잡도만 증가.
@@ -383,28 +383,6 @@
   없다 — 필요 시 usage 이벤트 소비자가 token_budget 대비 비율로 판단하거나 M4에서
   추가. EventContract §8을 "확정: 집계 유지"로 갱신.
 - **결정자**: Claude 제안 (M2 실동작 근거).
-
-## D-028 (2026-07-14) 도메인 이벤트 taxonomy: 현행 6개 집계 타입을 최종 계약으로 채택
-
-- **상태**: 채택 (D-022의 이월 항목 해소).
-- **맥락**: D-022는 세분 taxonomy(session.*, agent.*, proposal.*, vote.*, limit.*)
-  확정을 "발행 지점 구현과 함께"로 미뤘다. M2a에서 모든 발행 지점(SessionManager)이
-  구현되어 판단 근거가 생겼다.
-- **결정**: **세분 dotted taxonomy를 채택하지 않고 현행 6개 집계 타입**
-  (session_status / message / agent_state / usage / vote_status / result)을 최종
-  SSE·영속화 계약으로 확정한다. EventContract §8의 후보 목록은 매핑 참고 표로만
-  유지한다.
-- **대안**: ~20개 세분 타입으로 확장 — 발행 지점 구현 결과, 세분 정보가 전부
-  payload에 이미 존재함이 확인됨 (agent.dead = agent_state{state:dead, detail},
-  proposal.approved = vote_status+result, limit.warning = usage payload의
-  budget 대비 비율로 대시보드가 계산 가능). 타입 확장은 계약·테스트·문서 전반의
-  churn 대비 소비자(대시보드 M4) 이득이 없음.
-- **선택 이유**: "실제로 필요한 최소 범위" 원칙. 봉투(event_id/sequence)는 이미
-  세분화와 호환되므로, M4 대시보드나 M6 확장에서 세분 타입이 실제로 필요해지면
-  추가 확장으로 재개정 가능(하위 호환).
-- **결과와 트레이드오프**: 이벤트 소비자는 타입+payload 필드 조합으로 상황을
-  판별해야 함(문서화됨). 계약 churn 0.
-- **결정자**: Claude 제안 — 사용자 이의 시 M2b PR 리뷰에서 재개정.
 
 ## D-029 (2026-07-14) SQLite 접근 방식: 표준 sqlite3 + asyncio.to_thread
 

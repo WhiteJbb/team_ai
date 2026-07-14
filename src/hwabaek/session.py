@@ -133,31 +133,44 @@ class SessionManager:
         loop = asyncio.get_running_loop()
         self._last_activity = loop.time()
         writer: asyncio.Task | None = None
-        if self._store is not None:
-            self._write_queue = asyncio.Queue()
-            writer = asyncio.create_task(self._write_behind(), name="store-writer")
-            self._persist_team_snapshot()
-            self._persist_session()
-        self._emit_session_status()
-
-        for spec in self._team.agents:
-            agent = AgentLoop(
-                name=spec.name,
-                system_prompt=spec.system_prompt,
-                model=self._team.model_for(spec.name),
-                task=self._task,
-                llm=self._llm_factory(spec),
-                bus=self._bus,
-                commands=_Commands(self),
-                hooks=_Hooks(self),
-                max_turns=spec.max_turns,
-            )
-            self._tasks.append(asyncio.create_task(agent.run(), name=f"agent:{spec.name}"))
-        watcher = asyncio.create_task(self._watch_timers(), name="watcher")
-        self._tasks.append(watcher)
-
         try:
+            if self._store is not None:
+                self._write_queue = asyncio.Queue()
+                writer = asyncio.create_task(self._write_behind(), name="store-writer")
+                self._persist_team_snapshot()
+                self._persist_session()
+            self._emit_session_status()
+
+            for spec in self._team.agents:
+                agent = AgentLoop(
+                    name=spec.name,
+                    system_prompt=spec.system_prompt,
+                    model=self._team.model_for(spec.name),
+                    task=self._task,
+                    llm=self._llm_factory(spec),
+                    bus=self._bus,
+                    commands=_Commands(self),
+                    hooks=_Hooks(self),
+                    max_turns=spec.max_turns,
+                )
+                self._tasks.append(
+                    asyncio.create_task(agent.run(), name=f"agent:{spec.name}")
+                )
+            watcher = asyncio.create_task(self._watch_timers(), name="watcher")
+            self._tasks.append(watcher)
             await self._done.wait()
+        except asyncio.CancelledError:
+            if not self._session.is_terminal:
+                self.interrupt("session task cancelled during shutdown")
+            raise
+        except Exception:
+            if not self._session.is_terminal:
+                self._finalize(
+                    SessionStatus.FAILED,
+                    fail_reason=FailReason.AGENT_ERROR,
+                    fail_detail="session runtime setup failed",
+                )
+            raise
         finally:
             # 종료 확정 이후 추가 LLM 호출·메시지가 없도록 전 태스크를 취소한다
             # (취소 후 추가 API 호출 금지 원칙).
@@ -174,6 +187,14 @@ class SessionManager:
     def cancel(self) -> None:
         """사용자 취소 — 최우선 종료 사유 (D-021 우선순위)."""
         self._finalize(SessionStatus.CANCELLED)
+
+    def interrupt(self, detail: str = "server stopped while the session was active") -> None:
+        """서버 종료로 중단 — 사용자 취소와 구분해 failed(interrupted)로 기록한다."""
+        self._finalize(
+            SessionStatus.FAILED,
+            fail_reason=FailReason.INTERRUPTED,
+            fail_detail=detail,
+        )
 
     # ------------------------------------------------------------------
     # 영속화 (write-behind, D-017)

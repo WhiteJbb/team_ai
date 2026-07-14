@@ -92,10 +92,10 @@ def create_app(
         try:
             yield
         finally:
-            # 종료: 활성 세션이 있으면 취소하고 store를 닫는다.
+            # 종료: 활성 세션은 사용자 취소와 구분해 interrupted로 종결한다.
             active = registry.get_runner_for_shutdown()
             if active is not None and not active.done:
-                active.manager.cancel()
+                active.manager.interrupt()
                 await active.wait_done(timeout=5.0)
             if store is not None:
                 await store.close()

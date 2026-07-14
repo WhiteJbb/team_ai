@@ -60,7 +60,8 @@ def build_app(args: argparse.Namespace):
     )
 
 
-def main() -> None:
+def create_parser() -> argparse.ArgumentParser:
+    """서버 CLI 파서 — 옵션 충돌을 uvicorn 기동 전에 검증한다."""
     parser = argparse.ArgumentParser(
         prog="python -m hwabaek.serve",
         description="Run the hwabaek local HTTP server (127.0.0.1 only).",
@@ -70,7 +71,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--team", default="default",
-        help="default team name when a request omits it (default: default)",
+        help="default team for real runs when a request omits it; ignored with --fake",
     )
     parser.add_argument(
         "--auth", choices=["api_key", "chatgpt_oauth"], default="api_key",
@@ -80,15 +81,20 @@ def main() -> None:
         "--fake", action="store_true",
         help="hermetic demo with a scripted fake LLM (no network, no key)",
     )
-    parser.add_argument(
+    persistence = parser.add_mutually_exclusive_group()
+    persistence.add_argument(
         "--db", default="data/hwabaek.db",
         help="sqlite path for session records (default: data/hwabaek.db)",
     )
-    parser.add_argument(
+    persistence.add_argument(
         "--no-db", action="store_true",
         help="disable persistence (in-memory active session only)",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = create_parser().parse_args()
 
     app = build_app(args)
     print(f"hwabaek server on http://{HOST}:{args.port}"

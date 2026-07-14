@@ -209,6 +209,21 @@ class ServerSseTest(unittest.TestCase):
             r = client.get("/sessions/nope/events")
             self.assertEqual(r.status_code, 404)
 
+    def test_invalid_last_event_id_400(self) -> None:
+        app = self._app(provider=self._submit_provider(), team_override=_first_team())
+        with TestClient(app) as client:
+            sid = client.post("/sessions", json={"task": "go"}).json()["id"]
+            for value in ("not-an-integer", "-1", str(1 << 63)):
+                r = client.get(
+                    f"/sessions/{sid}/events",
+                    headers={"Last-Event-ID": value},
+                )
+                self.assertEqual(r.status_code, 400)
+                self.assertEqual(
+                    r.json()["detail"],
+                    "Last-Event-ID must be a non-negative integer",
+                )
+
 
 def _evt(seq: int) -> Event:
     return Event(
@@ -297,6 +312,16 @@ class SseReplayRaceTest(unittest.IsolatedAsyncioTestCase):
 
         chunks = [c async for c in registry._stream_from_runner(runner, 1)]
         self.assertEqual(self._seqs(chunks), [2, 3])
+
+    async def test_slow_subscriber_is_disconnected_at_queue_limit(self) -> None:
+        runner = SessionRunner(subscriber_queue_size=2)
+        queue = runner.subscribe()
+        runner.on_event(_evt(0))
+        runner.on_event(_evt(1))
+        runner.on_event(_evt(2))
+
+        self.assertNotIn(queue, runner._subscribers)
+        self.assertIsNone(await queue.get())
 
 
 if __name__ == "__main__":

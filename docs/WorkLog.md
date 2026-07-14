@@ -2,6 +2,44 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M3 완료: FastAPI REST/SSE 서버 + 재시작 복원 (feat/m3-server)
+
+### 진행한 작업
+- 서버 코어 커밋 `8374d8a`: FastAPI 조립, `POST/GET /sessions`, 취소, 팀 목록,
+  세션 상세, health, SSE 실시간 스트림·backlog replay·`Last-Event-ID`, SQLite
+  재시작 복원, `python -m hwabaek.serve` 진입점과 밀폐 테스트 구현.
+- 완료 기준 실서버 검증: health/teams/세션 생성·조회/종료 세션 cancel 409/SSE
+  sequence 0..7/`Last-Event-ID: 1` 재개 sequence 2/잘못된 헤더 400 확인.
+  같은 임시 DB로 서버를 재기동해 완료 세션이 메시지 1건·제안 1건과 함께 조회됨.
+- 코드 정밀 / 신규 사용자 워크스루 / 문서-코드 일치 3렌즈를 독립 실행해 발견 사항을
+  일괄 수정:
+  - 재시작 `failed(interrupted)` 전환에 다음 sequence의 `session_status` 이벤트를
+    함께 영속화.
+  - graceful shutdown을 사용자 `cancelled`와 구분해 `failed(interrupted)`로 기록.
+  - LLM 팩토리 조립 예외를 `failed(agent_error)`로 종결하고 agent/writer 자원 정리.
+  - 공백 task, fake 모드의 잘못된 명시 team, 충돌하는 `--db/--no-db`, 음수·비정수·
+    SQLite 범위 초과 `Last-Event-ID`를 요청 경계에서 거부.
+  - 느린 SSE 구독자 큐를 512개로 제한하고 초과 연결은 재접속으로 복구하도록 종료.
+- 문서 정합: README PowerShell 5.1 실행 예시·REST 응답표, IA의 M3 데이터 연결,
+  EventContract의 실제 SSE frame/replay/복원 규칙, DecisionLog의 D-022 필드명과
+  중복 D-028, Plan의 M3 상태를 현재 코드와 맞춤.
+- 전체 테스트 **467개, 3회 반복 통과**(5.804s / 5.776s / 5.704s).
+
+### 오류/이슈 (모두 수정 완료)
+- 초기 수동 재현에서 `Session` 인자명을 `team`으로 잘못 써 TypeError 발생 → 계약의
+  `team_name`으로 바로잡아 재현, 상태 갱신만 되고 이벤트가 0건인 결함을 확정.
+- 대상 unittest 클래스명을 `ServerAPITest`로 잘못 호출해 loader 오류 → 실제
+  `ServerApiTest`로 재실행해 통과.
+- 문서 일괄 패치가 중복 D-028의 실제 문구 차이로 검증 실패 → 어떤 파일도 부분 적용되지
+  않은 것을 확인하고 정확한 범위를 읽어 작은 패치로 분리 적용.
+- 테스트 시 `fastapi.testclient`의 httpx→httpx2 전환 deprecation warning이 출력되나
+  기능 실패는 없으며 3회 반복 결과는 안정적. 의존성 전환은 별도 호환성 검토 대상으로 둠.
+
+### 후속
+- SQLite 과거 이벤트의 페이지 단위 replay/compaction은 M5 견고화에서 처리.
+- M4 착수 시 JSON API와 충돌하지 않는 대시보드 URL namespace(`/app/...` 또는 hash)를 확정.
+- M3 PR 생성 후 squash merge.
+
 ## 2026-07-14 — M2b 완료: 실 세션 합의 성공 (feat/m2b-store)
 
 ### 진행한 작업

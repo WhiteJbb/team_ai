@@ -89,7 +89,7 @@ agents:                  # 1명 이상
 | M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
 | M2a | 코어 엔진 (버스/에이전트 루프/합의/종료 정책, 인메모리) | ✅ 완료 |
 | M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | ✅ 완료 |
-| M3 | 서버 (FastAPI REST + SSE) | 예정 |
+| M3 | 서버 (FastAPI REST + SSE) | ✅ 완료 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
 | M6 | 확장 실험 (외부 워커, 도구, 도트 월드 UI) | 후순위 |
@@ -122,6 +122,63 @@ agents:                  # 1명 이상
 세션 이벤트가 콘솔에 실시간 출력되고, 종료 시 상태·결과(또는 미승인 초안)·토큰
 사용량이 표시됩니다. 세션 기록은 기본적으로 SQLite(`data/hwabaek.db`)에
 저장됩니다 — 경로는 `--db`, 비활성화는 `--no-db`. 웹 대시보드는 M4에서 제공됩니다.
+
+## 서버 실행 (M3)
+
+`python -m hwabaek.serve`로 REST + SSE 서버를 띄웁니다. **localhost(127.0.0.1)
+전용으로 고정**되며 인증 계층은 없습니다(D-012) — 외부에 노출하지 않습니다.
+
+```
+# 밀폐 데모 — 실키/네트워크/DB 없이 기동
+.venv\Scripts\python.exe -m hwabaek.serve --fake --no-db
+
+# 실제 실행 — 기본 api_key 모드는 OPENAI_API_KEY 필요
+.venv\Scripts\python.exe -m hwabaek.serve
+
+# ChatGPT OAuth 모드 — 먼저 chatgpt_auth login 필요
+.venv\Scripts\python.exe -m hwabaek.serve --auth chatgpt_oauth
+
+# 포트/기본 팀 지정
+.venv\Scripts\python.exe -m hwabaek.serve --port 9000 --team default
+```
+
+주요 인자: `--port`(기본 8000) · `--team`(요청에 team 생략 시 기본 팀, 기본
+`default`, 실 LLM 모드 전용) · `--auth api_key|chatgpt_oauth`(실 LLM 인증 모드,
+`--fake`에서는 무시) ·
+`--fake`(스크립트 Fake LLM 밀폐 데모) · `--db <path>`(기본 `data/hwabaek.db`) ·
+`--no-db`(영속화 비활성). `--db`와 `--no-db`는 함께 쓸 수 없습니다. fake 모드는
+내장 `smoke` 팀을 사용하며, 요청 body에 다른 team을 명시하면 400을 반환합니다.
+`--no-db`에서는 현재/가장 최근 세션 스냅샷과 SSE backlog만 메모리에 남고,
+메시지·제안·투표 상세 배열은 저장하지 않으며 다음 세션이나 재시작 시 사라집니다.
+
+PowerShell 5.1에서 태스크 제출 → 조회 최소 예시:
+
+```powershell
+$created = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions `
+  -ContentType 'application/json' -Body '{"task":"summarize the notes"}'
+$sessionId = $created.id
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/sessions/$sessionId"
+Invoke-RestMethod -Uri http://127.0.0.1:8000/teams
+
+# SSE 실시간 구독. PowerShell의 curl 별칭을 피하려고 curl.exe를 명시합니다.
+curl.exe -N "http://127.0.0.1:8000/sessions/$sessionId/events"
+
+# 마지막으로 적용한 SSE id가 1이면 sequence 2부터 재개
+curl.exe -N -H 'Last-Event-ID: 1' "http://127.0.0.1:8000/sessions/$sessionId/events"
+```
+
+| 엔드포인트 | 성공 응답 | 주요 오류 |
+|---|---|---|
+| `GET /health` | 200 `{"status":"ok"}` | — |
+| `POST /sessions` | 201, 평면 Session | 잘못된 팀 400, 실행 중 세션 409, 잘못된 body 422 |
+| `GET /sessions?limit=50` | 200 `{"sessions": [...]}` (`limit` 1~200 보정) | — |
+| `GET /sessions/{id}` | 200 `{"session": ..., "messages": [...], "proposals": [...], "votes": [...]}` | 없음 404 |
+| `POST /sessions/{id}/cancel` | 200, 평면 Session | 없음 404, 종료 세션 409 |
+| `GET /teams` | 200 `{"teams": [...]}` | 설정 오류 400 |
+| `GET /sessions/{id}/events` | 200 SSE; 종료 세션은 backlog 후 연결 종료 | 잘못된 `Last-Event-ID` 400, 없음 404 |
+
+SSE의 정확한 와이어 형식과 재구독 규칙은
+[docs/EventContract.md](docs/EventContract.md)를 참조하세요.
 
 ## 개발 환경 (Windows)
 
