@@ -12,6 +12,7 @@ max_turns로 막고, proposal/voting/revision은 단계별 2회 상한으로 별
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Protocol
 
 from hwabaek.contracts import (
@@ -35,6 +36,8 @@ from hwabaek.llm.base import (
     ToolSpec,
     Turn,
 )
+
+logger = logging.getLogger(__name__)
 
 # 에이전트에게 부여하는 도구 3종 — 이름은 contracts.COMMAND_*와 일치해야 한다.
 AGENT_TOOLS: tuple[ToolSpec, ...] = (
@@ -324,7 +327,14 @@ class AgentLoop:
             # 반영한다. outer wait 루프로 돌아갈 때까지 inbox를 방치하지 않는다.
             self._drain_inbox()
             self._hooks.on_state(self.name, AgentState.THINKING)
-            self._turns = truncate_history(self._turns, self._history_limit)
+            # 절단 발생 관측 (D-038) — 세밀 보존 규칙 도입 여부는 실측 빈도로 결정.
+            truncated = truncate_history(self._turns, self._history_limit)
+            if len(truncated) < len(self._turns):
+                logger.warning(
+                    "agent %s history truncated (%d -> %d turns, limit %d)",
+                    self.name, len(self._turns), len(truncated), self._history_limit,
+                )
+            self._turns = truncated
             instruction_for = getattr(self._hooks, "instruction_for", None)
             instruction = instruction_for(self.name) if instruction_for else None
             proposal_for = getattr(self._hooks, "proposal_for", None)
